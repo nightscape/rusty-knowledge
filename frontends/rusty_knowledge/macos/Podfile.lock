@@ -1,0 +1,22 @@
+PODS:
+  - FlutterMacOS (1.0.0)
+  - rust_lib_rusty_knowledge (0.0.1):
+    - FlutterMacOS
+
+DEPENDENCIES:
+  - FlutterMacOS (from `Flutter/ephemeral`)
+  - rust_lib_rusty_knowledge (from `Flutter/ephemeral/.symlinks/plugins/rust_lib_rusty_knowledge/macos`)
+
+EXTERNAL SOURCES:
+  FlutterMacOS:
+    :path: Flutter/ephemeral
+  rust_lib_rusty_knowledge:
+    :path: Flutter/ephemeral/.symlinks/plugins/rust_lib_rusty_knowledge/macos
+
+SPEC CHECKSUMS:
+  FlutterMacOS: d0db08ddef1a9af05a5ec4b724367152bb0500b1
+  rust_lib_rusty_knowledge: b47e59b809780c935d1e2a48c77cd4a732656fa0
+
+PODFILE CHECKSUM: a1d15ca614aeb868ad3fc3ce122bfc67a833a07f
+
+COCOAPODS: 1.16.2
