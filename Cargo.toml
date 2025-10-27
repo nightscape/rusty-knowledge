@@ -1,0 +1,9 @@
+[workspace]
+members = [
+    "crates/rusty-knowledge",
+    "rusty-knowledge-macros",
+]
+exclude = [
+    "frontends/rusty_knowledge/rust",
+]
+resolver = "2"
