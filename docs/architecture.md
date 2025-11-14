@@ -55,7 +55,7 @@ A unified system combining Personal Knowledge Management (PKM) with task/project
 │ Internal      │      │  External        │
 │ Content       │      │  Systems         │
 │               │      │                  │
-│ Loro (full    │      │ SQLite cache +   │
+│ Loro (full    │      │ Turso cache +   │
 │ CRDT power)   │      │ adapters         │
 │               │      │                  │
 │ ↓             │      │ ↓                │
@@ -66,7 +66,7 @@ A unified system combining Personal Knowledge Management (PKM) with task/project
 
 **Why:**
 - Loro where it shines: your notes, relationships, collaborative editing
-- Simple SQLite cache for external read-mostly data
+- Simple Turso cache for external read-mostly data
 - 50% less code for external integrations
 - Easier debugging and testing
 
@@ -108,7 +108,7 @@ Individual Block Editors (TipTap per block)
 ```
 External System (Todoist/Jira/Gmail)
         ↓ periodic sync
-    Local Cache (SQLite)
+    Local Cache (Turso - libSQL embedded)
         ↓ read/write
     Application
         ↓ push updates
@@ -231,7 +231,7 @@ projects/
 - **Sync:** Loro peer-to-peer or via sync server
 
 ### External Content (External Systems)
-- **Storage:** SQLite cache
+- **Storage:** Turso cache
 - **Content types:** Todoist tasks, Jira issues, Gmail messages, calendar events
 - **Features:** Offline access, fast queries, eventual consistency
 - **Sync:** Adapter-managed bidirectional sync with conflict resolution
@@ -272,7 +272,7 @@ doc.get_map("task_relationships") // Links between tasks and notes
 ### Phase 2: First Integration (2-3 months)
 - Add Todoist integration
 - Prove adapter pattern works
-- SQLite cache implementation
+- Turso cache implementation
 - Sync conflict handling
 
 ### Phase 3: Expansion (ongoing)

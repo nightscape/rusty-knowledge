@@ -1,8 +1,11 @@
 use crate::core::predicate::Eq;
 use crate::core::queryable_cache::QueryableCache;
-use crate::core::traits::{DataSource, Queryable, Result};
+use crate::core::datasource::{DataSource, CrudOperationProvider};
+use crate::core::traits::{Queryable, Result};
+use crate::storage::types::Value;
 use crate::storage::InMemoryTaskStore;
 use crate::tasks::{CompletedLens, Task, TitleLens};
+use std::collections::HashMap;
 
 pub async fn setup_queryable_task_cache() -> Result<QueryableCache<InMemoryTaskStore, Task>> {
     let store = InMemoryTaskStore::new();
@@ -12,9 +15,23 @@ pub async fn setup_queryable_task_cache() -> Result<QueryableCache<InMemoryTaskS
     let mut task3 = Task::new("Completed task".to_string(), None);
     task3.completed = true;
 
-    store.insert(task1).await?;
-    store.insert(task2).await?;
-    store.insert(task3).await?;
+    let mut fields1 = HashMap::new();
+    fields1.insert("id".to_string(), Value::String(task1.id.clone()));
+    fields1.insert("title".to_string(), Value::String(task1.title.clone()));
+    fields1.insert("completed".to_string(), Value::Boolean(task1.completed));
+    store.create(fields1).await?;
+
+    let mut fields2 = HashMap::new();
+    fields2.insert("id".to_string(), Value::String(task2.id.clone()));
+    fields2.insert("title".to_string(), Value::String(task2.title.clone()));
+    fields2.insert("completed".to_string(), Value::Boolean(task2.completed));
+    store.create(fields2).await?;
+
+    let mut fields3 = HashMap::new();
+    fields3.insert("id".to_string(), Value::String(task3.id.clone()));
+    fields3.insert("title".to_string(), Value::String(task3.title.clone()));
+    fields3.insert("completed".to_string(), Value::Boolean(task3.completed));
+    store.create(fields3).await?;
 
     let cache = QueryableCache::with_database(store, ":memory:").await?;
     cache.sync().await?;
@@ -83,7 +100,11 @@ mod tests {
         let cache = setup_queryable_task_cache().await.unwrap();
 
         let new_task = Task::new("Newly added task".to_string(), None);
-        cache.insert(new_task).await.unwrap();
+        let mut fields = HashMap::new();
+        fields.insert("id".to_string(), Value::String(new_task.id.clone()));
+        fields.insert("title".to_string(), Value::String(new_task.title.clone()));
+        fields.insert("completed".to_string(), Value::Boolean(new_task.completed));
+        cache.create(fields).await.unwrap();
 
         let title_pred = Eq::new(TitleLens, "Newly added task".to_string());
         let found = cache.query(title_pred).await.unwrap();
@@ -100,9 +121,7 @@ mod tests {
         let first_task = &all_tasks[0];
         let id = first_task.id.clone();
 
-        let mut updated = first_task.clone();
-        updated.title = "Updated title".to_string();
-        cache.update(&id, updated).await.unwrap();
+        cache.set_field(&id, "title", Value::String("Updated title".to_string())).await.unwrap();
 
         let title_pred = Eq::new(TitleLens, "Updated title".to_string());
         let found = cache.query(title_pred).await.unwrap();
@@ -140,9 +159,23 @@ mod tests {
         let mut task3 = Task::new("Task 3".to_string(), None);
         task3.completed = true;
 
-        store.insert(task1).await.unwrap();
-        store.insert(task2).await.unwrap();
-        store.insert(task3).await.unwrap();
+        let mut fields1 = HashMap::new();
+        fields1.insert("id".to_string(), Value::String(task1.id.clone()));
+        fields1.insert("title".to_string(), Value::String(task1.title.clone()));
+        fields1.insert("completed".to_string(), Value::Boolean(task1.completed));
+        store.create(fields1).await.unwrap();
+
+        let mut fields2 = HashMap::new();
+        fields2.insert("id".to_string(), Value::String(task2.id.clone()));
+        fields2.insert("title".to_string(), Value::String(task2.title.clone()));
+        fields2.insert("completed".to_string(), Value::Boolean(task2.completed));
+        store.create(fields2).await.unwrap();
+
+        let mut fields3 = HashMap::new();
+        fields3.insert("id".to_string(), Value::String(task3.id.clone()));
+        fields3.insert("title".to_string(), Value::String(task3.title.clone()));
+        fields3.insert("completed".to_string(), Value::Boolean(task3.completed));
+        store.create(fields3).await.unwrap();
 
         let cache = QueryableCache::with_database(store, ":memory:")
             .await

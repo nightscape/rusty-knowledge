@@ -1,9 +1,13 @@
 [workspace]
 members = [
     "crates/rusty-knowledge",
-    "rusty-knowledge-macros",
+    "crates/rusty-knowledge-todoist",
+    "crates/query-render",
+    "crates/rusty-knowledge-macros",
+    "crates/rusty-knowledge-macros-test",
+    "frontends/tui",
 ]
 exclude = [
-    "frontends/rusty_knowledge/rust",
+    "frontends/flutter/rust",
 ]
 resolver = "2"

@@ -1,16 +1,16 @@
 use crate::storage::backend::StorageBackend;
-use crate::storage::sqlite::SqliteBackend;
-use crate::storage::types::{Entity, Filter, Value};
+use crate::storage::turso::TursoBackend;
+use crate::storage::types::{StorageEntity, Filter, Value};
 use crate::tasks::Task;
 use std::collections::HashMap;
 
 pub struct SqliteTaskStore {
-    backend: SqliteBackend,
+    backend: TursoBackend,
 }
 
 impl SqliteTaskStore {
     pub async fn new_in_memory() -> anyhow::Result<Self> {
-        let mut backend = SqliteBackend::new_in_memory().await?;
+        let mut backend = TursoBackend::new_in_memory().await?;
         let schema = Task::entity_schema();
         backend.create_entity(&schema).await?;
 
@@ -18,7 +18,7 @@ impl SqliteTaskStore {
     }
 
     pub async fn new(db_path: &str) -> anyhow::Result<Self> {
-        let mut backend = SqliteBackend::new(db_path).await?;
+        let mut backend = TursoBackend::new(db_path).await?;
         let schema = Task::entity_schema();
         backend.create_entity(&schema).await?;
 
@@ -199,7 +199,7 @@ impl SqliteTaskStore {
     }
 }
 
-fn task_to_entity(task: &Task) -> Entity {
+fn task_to_entity(task: &Task) -> StorageEntity {
     let mut entity = HashMap::new();
     entity.insert("id".to_string(), Value::String(task.id.clone()));
     entity.insert("title".to_string(), Value::String(task.title.clone()));
@@ -212,7 +212,7 @@ fn task_to_entity(task: &Task) -> Entity {
     entity
 }
 
-fn entity_to_task(entity: &Entity) -> anyhow::Result<Task> {
+fn entity_to_task(entity: &StorageEntity) -> anyhow::Result<Task> {
     let id = match entity.get("id") {
         Some(Value::String(s)) => s.clone(),
         _ => anyhow::bail!("Missing or invalid id"),

@@ -263,7 +263,7 @@ This proves our property-based tests are working correctly and can catch subtle 
 ### ✅ Phase 3B: Dart-Side Integration & Mirror Types System
 
 **Duration**: Complete (2025-10-25)
-**Implementation**: `frontends/rusty_knowledge/lib/data/rust_block_repository.dart`
+**Implementation**: `frontends/flutter/lib/data/rust_block_repository.dart`
 
 #### Problem Statement
 
@@ -363,7 +363,7 @@ No issues found! (ran in 0.9s)
 #### Code Locations
 
 **Primary Changes**:
-- `frontends/rusty_knowledge/lib/data/rust_block_repository.dart`
+- `frontends/flutter/lib/data/rust_block_repository.dart`
   - Lines 9-13: Imports (added types import)
   - Lines 18: Cache type updated
   - Lines 28: Stream subscription type updated
@@ -373,7 +373,7 @@ No issues found! (ran in 0.9s)
   - Lines 169-393: Updated all FFI methods with error handling
 
 **Supporting Changes**:
-- `frontends/rusty_knowledge/lib/providers/repository_provider.dart`
+- `frontends/flutter/lib/providers/repository_provider.dart`
   - Lines 3: Added `unawaited` import
   - Lines 24-26: Fixed dispose leak
 

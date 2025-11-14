@@ -70,17 +70,58 @@ async fn test_three_peer_synchronization() -> Result<()> {
     let text2 = doc2.get_text("editor").await?;
     let text3 = doc3.get_text("editor").await?;
 
+    // In this test, doc3 connects to both doc1 and doc2
+    // When doc3 connects to doc2, it already has doc1's content, so doc2 receives it too
+    // So:
+    // - doc1 has: its own content + doc3's content
+    // - doc2 has: its own content + doc3's content + doc1's content (through doc3)
+    // - doc3 has: its own content + doc1's content + doc2's content
+
+    assert!(
+        text1.contains("From peer 1"),
+        "doc1 should have its own content"
+    );
     assert!(
         text1.contains("From peer 3"),
         "doc1 should have received content from doc3"
+    );
+
+    assert!(
+        text2.contains("From peer 2"),
+        "doc2 should have its own content"
     );
     assert!(
         text2.contains("From peer 3"),
         "doc2 should have received content from doc3"
     );
+    // doc2 should also have doc1's content because doc3 had it when connecting
+    assert!(
+        text2.contains("From peer 1"),
+        "doc2 should have received doc1's content through doc3"
+    );
+
+    assert!(
+        text3.contains("From peer 3"),
+        "doc3 should have its own content"
+    );
+    assert!(
+        text3.contains("From peer 1"),
+        "doc3 should have received content from doc1"
+    );
+    assert!(
+        text3.contains("From peer 2"),
+        "doc3 should have received content from doc2"
+    );
+
+    // doc2 and doc3 should have all content, so they should be the same length
     assert_eq!(
-        text3, "From peer 3",
-        "doc3 should still have its own content"
+        text2.len(), text3.len(),
+        "doc2 and doc3 should have the same content (doc2 received doc1's content through doc3)"
+    );
+    // doc1 only synced with doc3, so it should have less content
+    assert!(
+        text1.len() < text2.len(),
+        "doc1 should have less content than doc2 (it didn't sync with doc2)"
     );
 
     Ok(())
@@ -231,6 +272,7 @@ async fn test_multiple_containers() -> Result<()> {
     doc1.insert_text("body", 0, "Document Body").await?;
     doc1.insert_text("footer", 0, "Footer Text").await?;
 
+    let doc1 = Arc::new(doc1);
     let doc2 = Arc::new(doc2);
     let doc2_clone = doc2.clone();
     let peer2_addr = doc2.node_addr();
@@ -239,7 +281,8 @@ async fn test_multiple_containers() -> Result<()> {
 
     sleep(Duration::from_millis(500)).await;
 
-    doc1.connect_and_sync_to_peer(peer2_addr).await?;
+    let doc1_clone = doc1.clone();
+    doc1_clone.connect_and_sync_to_peer(peer2_addr).await?;
     sleep(Duration::from_millis(200)).await;
 
     let _ = accept_handle.await?;

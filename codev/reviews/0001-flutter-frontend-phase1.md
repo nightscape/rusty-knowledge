@@ -40,12 +40,12 @@ Phase 1 successfully established the foundational architecture for Flutter front
 
 ### 2. Flutter Project Structure
 
-**Location**: `frontends/rusty_knowledge/`
+**Location**: `frontends/flutter/`
 
 **Setup Completed:**
 - Flutter project created with Android, Linux, macOS, Windows platforms
 - FRB integration via `flutter_rust_bridge_codegen integrate`
-- Rust bridge crate at `frontends/rusty_knowledge/rust/`
+- Rust bridge crate at `frontends/flutter/rust/`
 - Dependencies: flutter_riverpod, hooks_riverpod, flutter_hooks, outliner_view
 - Generated Dart bindings verified with `flutter analyze` (no issues)
 - Directory structure: `lib/data/`, `lib/ui/`, `lib/models/`, `lib/providers/`
@@ -59,7 +59,7 @@ Phase 1 successfully established the foundational architecture for Flutter front
 - Workspace exclusion for Flutter Rust crate
 
 **Workspace:**
-- Workspace `Cargo.toml` excludes `frontends/rusty_knowledge/rust`
+- Workspace `Cargo.toml` excludes `frontends/flutter/rust`
 - Prevents conflicts with main workspace
 
 ### 4. CI Pipeline

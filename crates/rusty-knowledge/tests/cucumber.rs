@@ -1,5 +1,5 @@
 use cucumber::World;
-use rusty_knowledge::storage::sqlite::SqliteBackend;
+use rusty_knowledge::storage::turso::TursoBackend;
 use rusty_knowledge::tasks::{Task, TaskStore};
 
 mod steps;
@@ -10,7 +10,7 @@ pub struct AppWorld {
     pub task_store: TaskStore,
     pub last_task: Option<Task>,
     pub all_tasks: Vec<Task>,
-    pub sqlite_backend: Option<SqliteBackend>,
+    pub sqlite_backend: Option<TursoBackend>,
     pub last_task_id: Option<String>,
     pub child_task_id: Option<String>,
 }

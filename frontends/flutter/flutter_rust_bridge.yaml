@@ -1,0 +1,4 @@
+rust_input: crate::api,query-render
+rust_root: rust/
+dart_output: lib/src/rust
+dump:

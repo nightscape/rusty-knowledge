@@ -1,0 +1,22 @@
+[package]
+name = "rust_lib_rusty_knowledge"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+anyhow = "1.0.100"
+async-trait = "0.1"
+chrono = "0.4"
+flutter_rust_bridge = "=2.11.1"
+rusty-knowledge = { path = "../../../crates/rusty-knowledge" }
+serde = "1.0.228"
+thiserror = "2.0"
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+uuid = { version = "1.11", features = ["v4"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(frb_expand)'] }

@@ -4,20 +4,9 @@ use std::sync::Arc;
 
 use super::entity::Entity;
 use super::value::Value;
+use super::datasource::DataSource;
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
-
-#[async_trait]
-pub trait DataSource<T>: Send + Sync
-where
-    T: Send + Sync + 'static,
-{
-    async fn get_all(&self) -> Result<Vec<T>>;
-    async fn get_by_id(&self, id: &str) -> Result<Option<T>>;
-    async fn insert(&self, item: T) -> Result<String>;
-    async fn update(&self, id: &str, item: T) -> Result<()>;
-    async fn delete(&self, id: &str) -> Result<()>;
-}
 
 pub trait Lens<T, U>: Clone + Send + Sync + 'static {
     fn get(&self, source: &T) -> Option<U>;
@@ -91,21 +80,15 @@ impl SqlPredicate {
         Self { sql, params }
     }
 
-    pub fn bind_all_sqlite<'q>(
-        &'q self,
-        mut query: sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'q>>,
-    ) -> sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'q>> {
-        for param in &self.params {
-            query = match param {
-                Value::String(s) => query.bind(s),
-                Value::Integer(i) => query.bind(i),
-                Value::Float(f) => query.bind(f),
-                Value::Boolean(b) => query.bind(b),
-                Value::Null => query.bind(None::<String>),
-                _ => query,
-            };
-        }
-        query
+    pub fn to_params(&self) -> Vec<turso::Value> {
+        self.params.iter().map(|p| match p {
+            Value::String(s) => turso::Value::Text(s.clone()),
+            Value::Integer(i) => turso::Value::Integer(*i),
+            Value::Float(f) => turso::Value::Real(*f),
+            Value::Boolean(b) => turso::Value::Integer(if *b { 1 } else { 0 }),
+            Value::Null => turso::Value::Null,
+            _ => turso::Value::Null,
+        }).collect()
     }
 }
 
@@ -201,6 +184,20 @@ where
     where
         P: Predicate<T> + Send + 'static;
 }
+
+/// Result of an incremental sync operation
+#[derive(Debug, Clone)]
+pub struct SyncResult<T, Token> {
+    /// All items from sync (for full sync) or changed items (for incremental)
+    pub items: Vec<T>,
+    /// Items that were updated (empty for full sync, populated for incremental)
+    pub updated: Vec<T>,
+    /// IDs of deleted items (empty for full sync, populated for incremental)
+    pub deleted: Vec<String>,
+    /// Token for next incremental sync (None if no more updates available)
+    pub next_token: Option<Token>,
+}
+
 
 pub trait HasSchema {
     fn schema() -> Schema;

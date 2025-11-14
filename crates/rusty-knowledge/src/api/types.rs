@@ -73,6 +73,7 @@ impl Traversal {
     pub const fn includes_level(&self, level: usize) -> bool {
         level >= self.min_level && level <= self.max_level
     }
+
 }
 
 /// A block in the hierarchical document structure.
@@ -144,6 +145,7 @@ impl Block {
 
         depth
     }
+
 }
 
 /// A block with its tree depth/nesting level.
@@ -169,6 +171,7 @@ pub struct BlockMetadata {
     /// Unix timestamp (milliseconds) when block was last updated
     pub updated_at: i64,
 }
+
 
 /// Structured error types for API operations.
 ///
@@ -218,50 +221,3 @@ pub struct NewBlock {
     pub id: Option<String>,
 }
 
-/// Position in the change stream to start watching from.
-///
-/// Used with `watch_changes_since()` to control whether to receive current state or only new changes.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum StreamPosition {
-    /// Start from the beginning: first stream all current blocks as Created events,
-    /// then stream subsequent changes
-    Beginning,
-    /// Start from a specific version: stream only changes that occurred after this version
-    Version(Vec<u8>),
-}
-
-/// Origin of a change event (local vs. remote).
-///
-/// Used to prevent UI echo when local changes sync back via P2P.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-pub enum ChangeOrigin {
-    /// Change initiated by this client
-    Local,
-    /// Change received from P2P sync
-    Remote,
-}
-
-/// Change notification event.
-///
-/// Emitted by the change stream to notify frontends of document updates.
-/// Includes origin tracking to suppress echo of local edits.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum BlockChange {
-    /// Block was created
-    Created { block: Block, origin: ChangeOrigin },
-    /// Block content was updated (character-level)
-    Updated {
-        id: String,
-        content: String,
-        origin: ChangeOrigin,
-    },
-    /// Block was deleted (tombstone set)
-    Deleted { id: String, origin: ChangeOrigin },
-    /// Block was moved to new parent/position
-    Moved {
-        id: String,
-        new_parent: String,
-        after: Option<String>,
-        origin: ChangeOrigin,
-    },
-}

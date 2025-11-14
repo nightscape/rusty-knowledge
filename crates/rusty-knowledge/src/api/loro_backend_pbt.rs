@@ -9,12 +9,12 @@ mod stateful_tests {
     use super::super::memory_backend::MemoryBackend;
     use super::super::pbt_infrastructure::{
         BlockTransition, apply_transition, check_transition_preconditions,
-        generate_crud_transitions, translate_transition, update_id_map_after_create,
+        generate_crud_transitions, populate_initial_id_map, translate_transition, update_id_map_after_create,
         verify_backends_match,
     };
-    use super::super::repository::{ChangeNotifications, CoreOperations, Lifecycle};
-    use super::super::types::BlockChange;
-    use crate::api::{StreamPosition, Traversal};
+    use super::super::repository::{CoreOperations, Lifecycle};
+    use super::super::streaming::{ChangeNotifications, Change, StreamPosition};
+    use crate::api::Traversal;
     use proptest::prelude::*;
     use proptest_state_machine::{ReferenceStateMachine, StateMachineTest};
     use std::collections::HashMap;
@@ -28,7 +28,7 @@ mod stateful_tests {
     struct WatcherStream {
         stream: Pin<
             Box<
-                dyn futures::Stream<Item = Result<BlockChange, super::super::types::ApiError>>
+                dyn futures::Stream<Item = Result<Vec<Change<super::super::types::Block>>, super::super::types::ApiError>>
                     + Send,
             >,
         >,
@@ -46,7 +46,7 @@ mod stateful_tests {
         watcher_id: WatcherId,
         base_version_idx: usize,
         last_consumed_idx: usize,
-        pending_events: Vec<BlockChange>,
+        pending_events: Vec<Change<super::super::types::Block>>,
     }
 
     /// Reference state wraps MemoryBackend (our reference implementation)
@@ -168,8 +168,7 @@ mod stateful_tests {
                         )
                         .await
                     }) {
-                        Ok(Ok(s)) => s,
-                        Ok(Err(e)) => panic!("Failed to create watcher: {:?}", e),
+                        Ok(s) => s,
                         Err(_) => panic!(
                             "Timed out creating watcher stream. Likely synchronous replay prefill into a bounded channel in MemoryBackend::watch_changes_since."
                         ),
@@ -199,8 +198,11 @@ mod stateful_tests {
                             )
                             .await
                         }) {
-                            Ok(Some(Ok(event))) => {
-                                pending_events.push(event);
+                            Ok(Some(Ok(batch))) => {
+                                // Stream returns batches, so we need to flatten them
+                                for event in batch {
+                                    pending_events.push(event);
+                                }
                                 drain_count += 1;
                             }
                             _ => break,
@@ -251,11 +253,7 @@ mod stateful_tests {
                                     )
                                     .await
                                 }) {
-                                    Ok(Ok(s)) => s,
-                                    Ok(Err(e)) => panic!(
-                                        "Failed to rehydrate watcher {}: {:?}",
-                                        watcher_id, e
-                                    ),
+                                    Ok(s) => s,
                                     Err(_) => panic!(
                                         "Timed out rehydrating watcher {}. Likely bounded replay prefill deadlock.",
                                         watcher_id
@@ -288,14 +286,17 @@ mod stateful_tests {
                                     )
                                     .await
                                 }) {
-                                    Ok(Some(Ok(event))) => {
-                                        if let Some(descriptor) =
-                                            state.watchers.get_mut(&watcher_id)
-                                        {
-                                            descriptor.pending_events.push(event);
-                                            descriptor.last_consumed_idx = state.versions.len() - 1;
+                                    Ok(Some(Ok(batch))) => {
+                                        // Stream returns batches, so we need to flatten them
+                                        for event in batch {
+                                            if let Some(descriptor) =
+                                                state.watchers.get_mut(&watcher_id)
+                                            {
+                                                descriptor.pending_events.push(event);
+                                                descriptor.last_consumed_idx = state.versions.len() - 1;
+                                            }
+                                            event_count += 1;
                                         }
-                                        event_count += 1;
                                     }
                                     _ => break,
                                 }
@@ -316,8 +317,8 @@ mod stateful_tests {
         initial_version: Vec<u8>,
         /// ID mapping: MemoryBackend ID → LoroBackend ID
         id_map: std::collections::HashMap<String, String>,
-        /// Watcher notifications: WatcherId → Arc<Mutex<Vec<BlockChange>>>
-        watcher_notifications: HashMap<WatcherId, Arc<Mutex<Vec<BlockChange>>>>,
+        /// Watcher notifications: WatcherId → Arc<Mutex<Vec<Change<Block>>>>
+        watcher_notifications: HashMap<WatcherId, Arc<Mutex<Vec<Change<super::super::types::Block>>>>>,
         /// Active watcher stream handles
         watcher_handles: HashMap<WatcherId, tokio::task::JoinHandle<()>>,
         /// Persistent runtime to keep spawned tasks alive
@@ -329,7 +330,7 @@ mod stateful_tests {
         type Reference = ReferenceState;
 
         fn init_test(
-            _ref_state: &<Self::Reference as ReferenceStateMachine>::State,
+            ref_state: &<Self::Reference as ReferenceStateMachine>::State,
         ) -> Self::SystemUnderTest {
             let runtime = Arc::new(tokio::runtime::Runtime::new().unwrap());
             let backend = runtime
@@ -338,10 +339,20 @@ mod stateful_tests {
 
             let initial_version = runtime.block_on(backend.get_current_version()).unwrap();
 
+            // Populate id_map with initial blocks (root + first child)
+            let mut id_map = HashMap::new();
+            runtime
+                .block_on(populate_initial_id_map(
+                    &mut id_map,
+                    &ref_state.backend,
+                    &backend,
+                ))
+                .expect("Failed to populate initial ID map");
+
             BlockTreeTest {
                 backend,
                 initial_version,
-                id_map: HashMap::new(),
+                id_map,
                 watcher_notifications: HashMap::new(),
                 watcher_handles: HashMap::new(),
                 runtime,
@@ -375,7 +386,6 @@ mod stateful_tests {
                         )
                         .await
                         .expect("Timed out creating SUT watcher stream. Likely bounded channel replay deadlock - watch_changes_since should spawn a task for replay instead of sending synchronously.")
-                        .unwrap()
                     });
 
                     // Drain replay events with timeout (mimics reference implementation)
@@ -393,8 +403,11 @@ mod stateful_tests {
                             )
                             .await
                         }) {
-                            Ok(Some(Ok(event))) => {
-                                notifications.lock().unwrap().push(event);
+                            Ok(Some(Ok(batch))) => {
+                                // Stream returns batches, so we need to flatten them
+                                for event in batch {
+                                    notifications.lock().unwrap().push(event);
+                                }
                                 drain_count += 1;
                             }
                             _ => break,
@@ -404,9 +417,12 @@ mod stateful_tests {
                     // Spawn task to continue listening for future events
                     let notifications_clone = notifications.clone();
                     let handle = runtime.spawn(async move {
-                        while let Some(change_result) = stream.next().await {
-                            if let Ok(change) = change_result {
-                                notifications_clone.lock().unwrap().push(change);
+                        while let Some(batch_result) = stream.next().await {
+                            if let Ok(batch) = batch_result {
+                                // Stream returns batches, so we need to flatten them
+                                for change in batch {
+                                    notifications_clone.lock().unwrap().push(change);
+                                }
                             }
                         }
                     });
@@ -479,118 +495,151 @@ mod stateful_tests {
                 );
 
                 // Compare each change (accounting for ID mapping)
-                for (ref_change, sut_change) in ref_changes.iter().zip(sut_changes.iter()) {
-                    match (ref_change, sut_change) {
-                        (
-                            BlockChange::Created {
-                                block: ref_block,
-                                origin: ref_origin,
-                            },
-                            BlockChange::Created {
-                                block: sut_block,
-                                origin: sut_origin,
-                            },
-                        ) => {
-                            assert_eq!(ref_origin, sut_origin, "Change origins should match");
-                            assert_eq!(
-                                ref_block.content, sut_block.content,
-                                "Block content should match"
-                            );
-                            // IDs will differ, but should be mapped
-                            if let Some(expected_sut_id) = state.id_map.get(&ref_block.id) {
-                                assert_eq!(
-                                    expected_sut_id, &sut_block.id,
-                                    "Block ID mapping should be consistent"
-                                );
-                            }
-                        }
-                        (
-                            BlockChange::Updated {
-                                id: ref_id,
-                                content: ref_content,
-                                origin: ref_origin,
-                            },
-                            BlockChange::Updated {
-                                id: sut_id,
-                                content: sut_content,
-                                origin: sut_origin,
-                            },
-                        ) => {
-                            assert_eq!(ref_origin, sut_origin, "Change origins should match");
-                            assert_eq!(ref_content, sut_content, "Updated content should match");
-                            if let Some(expected_sut_id) = state.id_map.get(ref_id) {
-                                assert_eq!(
-                                    expected_sut_id, sut_id,
-                                    "Updated block ID mapping should be consistent"
-                                );
-                            }
-                        }
-                        (
-                            BlockChange::Deleted {
-                                id: ref_id,
-                                origin: ref_origin,
-                            },
-                            BlockChange::Deleted {
-                                id: sut_id,
-                                origin: sut_origin,
-                            },
-                        ) => {
-                            assert_eq!(ref_origin, sut_origin, "Change origins should match");
-                            if let Some(expected_sut_id) = state.id_map.get(ref_id) {
-                                assert_eq!(
-                                    expected_sut_id, sut_id,
-                                    "Deleted block ID mapping should be consistent"
-                                );
-                            }
-                        }
-                        (
-                            BlockChange::Moved {
-                                id: ref_id,
-                                new_parent: ref_parent,
-                                after: ref_after,
-                                origin: ref_origin,
-                            },
-                            BlockChange::Moved {
-                                id: sut_id,
-                                new_parent: sut_parent,
-                                after: sut_after,
-                                origin: sut_origin,
-                            },
-                        ) => {
-                            assert_eq!(ref_origin, sut_origin, "Change origins should match");
-                            if let Some(expected_sut_id) = state.id_map.get(ref_id) {
-                                assert_eq!(
-                                    expected_sut_id, sut_id,
-                                    "Moved block ID mapping should be consistent"
-                                );
-                            }
-                            // Compare parent IDs (accounting for mapping)
-                            if let Some(expected) = state.id_map.get(ref_parent) {
-                                assert_eq!(
-                                    expected, sut_parent,
-                                    "Parent ID mapping should be consistent"
-                                );
-                            }
-                            // Compare after IDs (accounting for mapping)
-                            match (ref_after, sut_after) {
-                                (Some(ref_a), Some(sut_a)) => {
-                                    if let Some(expected) = state.id_map.get(ref_a) {
-                                        assert_eq!(
-                                            expected, sut_a,
-                                            "After ID mapping should be consistent"
-                                        );
+                // Match changes by content and parent_id instead of position,
+                // since notifications might arrive in different orders
+                let sut_changes_len = sut_changes.len();
+                let mut matched_sut_indices = std::collections::HashSet::new();
+
+                for ref_change in ref_changes.iter() {
+                    let matched = match ref_change {
+                        Change::Created {
+                            data: ref_block,
+                            origin: ref_origin,
+                        } => {
+                            // Find matching SUT change by content and parent_id (after ID translation)
+                            let translated_parent_id = state.id_map.get(&ref_block.parent_id)
+                                .cloned()
+                                .unwrap_or_else(|| ref_block.parent_id.clone());
+
+                            let sut_match = sut_changes.iter()
+                                .enumerate()
+                                .find(|(idx, sut_change)| {
+                                    !matched_sut_indices.contains(idx) &&
+                                    match sut_change {
+                                        Change::Created {
+                                            data: sut_block,
+                                            origin: sut_origin,
+                                        } => {
+                                            sut_block.content == ref_block.content
+                                                && sut_block.parent_id == translated_parent_id
+                                                && sut_origin == ref_origin
+                                        }
+                                        _ => false,
                                     }
+                                });
+
+                            if let Some((sut_idx, Change::Created { data: sut_block, origin: sut_origin })) = sut_match {
+                                matched_sut_indices.insert(sut_idx);
+                                assert_eq!(ref_origin, sut_origin, "Change origins should match");
+                                assert_eq!(
+                                    ref_block.content, sut_block.content,
+                                    "Block content should match"
+                                );
+                                // IDs will differ, but should be mapped
+                                if let Some(expected_sut_id) = state.id_map.get(&ref_block.id) {
+                                    assert_eq!(
+                                        expected_sut_id, &sut_block.id,
+                                        "Block ID mapping should be consistent"
+                                    );
                                 }
-                                (None, None) => {}
-                                _ => panic!("After ID presence mismatch in move notification"),
+                                true
+                            } else {
+                                false
                             }
                         }
-                        _ => panic!(
-                            "Change notification type mismatch: ref={:?}, sut={:?}",
-                            ref_change, sut_change
-                        ),
-                    }
+                        Change::Updated {
+                            id: ref_id,
+                            data: ref_block,
+                            origin: ref_origin,
+                        } => {
+                            // Find matching SUT change by ID (after translation) and content
+                            let translated_ref_id = state.id_map.get(ref_id)
+                                .cloned()
+                                .unwrap_or_else(|| ref_id.clone());
+
+                            let sut_match = sut_changes.iter()
+                                .enumerate()
+                                .find(|(idx, sut_change)| {
+                                    !matched_sut_indices.contains(idx) &&
+                                    match sut_change {
+                                        Change::Updated {
+                                            id: sut_id,
+                                            data: sut_block,
+                                            origin: sut_origin,
+                                        } => {
+                                            sut_id == &translated_ref_id
+                                                && sut_block.content == ref_block.content
+                                                && sut_origin == ref_origin
+                                        }
+                                        _ => false,
+                                    }
+                                });
+
+                            if let Some((sut_idx, Change::Updated { id: sut_id, data: sut_block, origin: sut_origin })) = sut_match {
+                                matched_sut_indices.insert(sut_idx);
+                                assert_eq!(ref_origin, sut_origin, "Change origins should match");
+                                assert_eq!(ref_block.content, sut_block.content, "Updated content should match");
+                                if let Some(expected_sut_id) = state.id_map.get(ref_id) {
+                                    assert_eq!(
+                                        expected_sut_id, sut_id,
+                                        "Updated block ID mapping should be consistent"
+                                    );
+                                }
+                                true
+                            } else {
+                                false
+                            }
+                        }
+                        Change::Deleted {
+                            id: ref_id,
+                            origin: ref_origin,
+                        } => {
+                            // Find matching SUT change by ID (after translation)
+                            let translated_ref_id = state.id_map.get(ref_id)
+                                .cloned()
+                                .unwrap_or_else(|| ref_id.clone());
+
+                            let sut_match = sut_changes.iter()
+                                .enumerate()
+                                .find(|(idx, sut_change)| {
+                                    !matched_sut_indices.contains(idx) &&
+                                    match sut_change {
+                                        Change::Deleted {
+                                            id: sut_id,
+                                            origin: sut_origin,
+                                        } => {
+                                            sut_id == &translated_ref_id
+                                                && sut_origin == ref_origin
+                                        }
+                                        _ => false,
+                                    }
+                                });
+
+                            if let Some((sut_idx, Change::Deleted { id: sut_id, origin: sut_origin })) = sut_match {
+                                matched_sut_indices.insert(sut_idx);
+                                assert_eq!(ref_origin, sut_origin, "Change origins should match");
+                                if let Some(expected_sut_id) = state.id_map.get(ref_id) {
+                                    assert_eq!(
+                                        expected_sut_id, sut_id,
+                                        "Deleted block ID mapping should be consistent"
+                                    );
+                                }
+                                true
+                            } else {
+                                false
+                            }
+                        }
+                    };
+
+                    assert!(matched, "Could not find matching SUT change for reference change: {:?}", ref_change);
                 }
+
+                // Ensure all SUT changes were matched
+                assert_eq!(
+                    matched_sut_indices.len(),
+                    sut_changes_len,
+                    "All SUT changes should be matched"
+                );
             }
         }
     }

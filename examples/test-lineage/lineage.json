@@ -1,0 +1,1769 @@
+{
+  "ast": {
+    "name": "Project",
+    "stmts": [
+      {
+        "VarDef": {
+          "kind": "Let",
+          "name": "ui_checkbox",
+          "value": {
+            "Func": {
+              "body": {
+                "Ident": [
+                  "checked"
+                ],
+                "span": "1:175-182"
+              },
+              "named_params": [
+                {
+                  "default_value": {
+                    "Literal": "Null",
+                    "span": "1:167-171"
+                  },
+                  "name": "checked"
+                }
+              ],
+              "params": [],
+              "return_ty": null
+            },
+            "span": "1:159-182"
+          }
+        },
+        "span": "1:0-182"
+      },
+      {
+        "VarDef": {
+          "kind": "Let",
+          "name": "ui_text",
+          "value": {
+            "Func": {
+              "body": {
+                "Ident": [
+                  "text_content"
+                ],
+                "span": "1:218-230"
+              },
+              "named_params": [
+                {
+                  "default_value": {
+                    "Literal": "Null",
+                    "span": "1:210-214"
+                  },
+                  "name": "text_content"
+                }
+              ],
+              "params": [],
+              "return_ty": null
+            },
+            "span": "1:197-230"
+          }
+        },
+        "span": "1:182-230"
+      },
+      {
+        "VarDef": {
+          "kind": "Let",
+          "name": "ui_badge",
+          "value": {
+            "Func": {
+              "body": {
+                "Ident": [
+                  "badge_content"
+                ],
+                "span": "1:279-292"
+              },
+              "named_params": [
+                {
+                  "default_value": {
+                    "Literal": "Null",
+                    "span": "1:260-264"
+                  },
+                  "name": "badge_content"
+                },
+                {
+                  "default_value": {
+                    "Literal": "Null",
+                    "span": "1:271-275"
+                  },
+                  "name": "color"
+                }
+              ],
+              "params": [],
+              "return_ty": null
+            },
+            "span": "1:246-292"
+          }
+        },
+        "span": "1:230-292"
+      },
+      {
+        "VarDef": {
+          "kind": "Let",
+          "name": "ui_row",
+          "value": {
+            "Func": {
+              "body": {
+                "Ident": [
+                  "items"
+                ],
+                "span": "1:320-325"
+              },
+              "named_params": [
+                {
+                  "default_value": {
+                    "Literal": "Null",
+                    "span": "1:312-316"
+                  },
+                  "name": "items"
+                }
+              ],
+              "params": [],
+              "return_ty": null
+            },
+            "span": "1:306-325"
+          }
+        },
+        "span": "1:292-325"
+      },
+      {
+        "VarDef": {
+          "kind": "Let",
+          "name": "ui_list",
+          "value": {
+            "Func": {
+              "body": {
+                "Ident": [
+                  "rel"
+                ],
+                "span": "1:394-397"
+              },
+              "named_params": [
+                {
+                  "default_value": {
+                    "Literal": "Null",
+                    "span": "1:344-348"
+                  },
+                  "name": "rel"
+                },
+                {
+                  "default_value": {
+                    "Literal": "Null",
+                    "span": "1:367-371"
+                  },
+                  "name": "hierarchical_sort"
+                },
+                {
+                  "default_value": {
+                    "Literal": "Null",
+                    "span": "1:386-390"
+                  },
+                  "name": "item_template"
+                }
+              ],
+              "params": [],
+              "return_ty": null
+            },
+            "span": "1:340-397"
+          }
+        },
+        "span": "1:325-397"
+      },
+      {
+        "VarDef": {
+          "kind": "Let",
+          "name": "ui_render",
+          "value": {
+            "Func": {
+              "body": {
+                "Ident": [
+                  "rel"
+                ],
+                "span": "1:426-429"
+              },
+              "named_params": [
+                {
+                  "default_value": {
+                    "Literal": "Null",
+                    "span": "1:418-422"
+                  },
+                  "name": "rel"
+                }
+              ],
+              "params": [],
+              "return_ty": null
+            },
+            "span": "1:414-429"
+          }
+        },
+        "span": "1:397-429"
+      },
+      {
+        "VarDef": {
+          "kind": "Main",
+          "name": "main",
+          "value": {
+            "Pipeline": {
+              "exprs": [
+                {
+                  "FuncCall": {
+                    "args": [
+                      {
+                        "Ident": [
+                          "blocks"
+                        ],
+                        "span": "1:436-442"
+                      }
+                    ],
+                    "name": {
+                      "Ident": [
+                        "from"
+                      ],
+                      "span": "1:431-435"
+                    }
+                  },
+                  "span": "1:431-442"
+                },
+                {
+                  "FuncCall": {
+                    "args": [
+                      {
+                        "Tuple": [
+                          {
+                            "Ident": [
+                              "id"
+                            ],
+                            "span": "1:456-458"
+                          },
+                          {
+                            "Ident": [
+                              "parent_id"
+                            ],
+                            "span": "1:464-473"
+                          },
+                          {
+                            "Ident": [
+                              "depth"
+                            ],
+                            "span": "1:479-484"
+                          },
+                          {
+                            "Ident": [
+                              "sort_key"
+                            ],
+                            "span": "1:490-498"
+                          },
+                          {
+                            "Ident": [
+                              "content"
+                            ],
+                            "span": "1:504-511"
+                          },
+                          {
+                            "Ident": [
+                              "completed"
+                            ],
+                            "span": "1:517-526"
+                          },
+                          {
+                            "Ident": [
+                              "block_type"
+                            ],
+                            "span": "1:532-542"
+                          },
+                          {
+                            "Ident": [
+                              "collapsed"
+                            ],
+                            "span": "1:548-557"
+                          }
+                        ],
+                        "span": "1:450-559"
+                      }
+                    ],
+                    "name": {
+                      "Ident": [
+                        "select"
+                      ],
+                      "span": "1:443-449"
+                    }
+                  },
+                  "span": "1:443-559"
+                },
+                {
+                  "FuncCall": {
+                    "args": [
+                      {
+                        "Tuple": [
+                          {
+                            "FuncCall": {
+                              "args": [],
+                              "name": {
+                                "Ident": [
+                                  "ui_checkbox"
+                                ],
+                                "span": "1:588-599"
+                              },
+                              "named_args": {
+                                "checked": {
+                                  "Ident": [
+                                    "this",
+                                    "completed"
+                                  ],
+                                  "span": "1:608-622"
+                                }
+                              }
+                            },
+                            "alias": "checkbox_el",
+                            "span": "1:587-623"
+                          },
+                          {
+                            "FuncCall": {
+                              "args": [],
+                              "name": {
+                                "Ident": [
+                                  "ui_text"
+                                ],
+                                "span": "1:638-645"
+                              },
+                              "named_args": {
+                                "text_content": {
+                                  "Ident": [
+                                    "this",
+                                    "id"
+                                  ],
+                                  "span": "1:659-666"
+                                }
+                              }
+                            },
+                            "alias": "id_el",
+                            "span": "1:637-667"
+                          },
+                          {
+                            "FuncCall": {
+                              "args": [],
+                              "name": {
+                                "Ident": [
+                                  "ui_text"
+                                ],
+                                "span": "1:685-692"
+                              },
+                              "named_args": {
+                                "text_content": {
+                                  "Literal": {
+                                    "String": " "
+                                  },
+                                  "span": "1:706-709"
+                                }
+                              }
+                            },
+                            "alias": "space_el",
+                            "span": "1:684-710"
+                          },
+                          {
+                            "FuncCall": {
+                              "args": [],
+                              "name": {
+                                "Ident": [
+                                  "ui_text"
+                                ],
+                                "span": "1:730-737"
+                              },
+                              "named_args": {
+                                "text_content": {
+                                  "Ident": [
+                                    "this",
+                                    "content"
+                                  ],
+                                  "span": "1:751-763"
+                                }
+                              }
+                            },
+                            "alias": "content_el",
+                            "span": "1:729-764"
+                          },
+                          {
+                            "FuncCall": {
+                              "args": [],
+                              "name": {
+                                "Ident": [
+                                  "ui_text"
+                                ],
+                                "span": "1:789-796"
+                              },
+                              "named_args": {
+                                "text_content": {
+                                  "Literal": {
+                                    "String": " parent: "
+                                  },
+                                  "span": "1:810-821"
+                                }
+                              }
+                            },
+                            "alias": "parent_label_el",
+                            "span": "1:788-822"
+                          },
+                          {
+                            "FuncCall": {
+                              "args": [],
+                              "name": {
+                                "Ident": [
+                                  "ui_text"
+                                ],
+                                "span": "1:841-848"
+                              },
+                              "named_args": {
+                                "text_content": {
+                                  "Ident": [
+                                    "this",
+                                    "parent_id"
+                                  ],
+                                  "span": "1:862-876"
+                                }
+                              }
+                            },
+                            "alias": "parent_el",
+                            "span": "1:840-877"
+                          },
+                          {
+                            "FuncCall": {
+                              "args": [],
+                              "name": {
+                                "Ident": [
+                                  "ui_badge"
+                                ],
+                                "span": "1:895-903"
+                              },
+                              "named_args": {
+                                "badge_content": {
+                                  "Ident": [
+                                    "this",
+                                    "block_type"
+                                  ],
+                                  "span": "1:918-933"
+                                },
+                                "color": {
+                                  "Literal": {
+                                    "String": "cyan"
+                                  },
+                                  "span": "1:940-946"
+                                }
+                              }
+                            },
+                            "alias": "badge_el",
+                            "span": "1:894-947"
+                          },
+                          {
+                            "FuncCall": {
+                              "args": [],
+                              "name": {
+                                "Ident": [
+                                  "ui_row"
+                                ],
+                                "span": "1:963-969"
+                              },
+                              "named_args": {
+                                "items": {
+                                  "Array": [
+                                    {
+                                      "Ident": [
+                                        "checkbox_el"
+                                      ],
+                                      "span": "1:977-988"
+                                    },
+                                    {
+                                      "Ident": [
+                                        "id_el"
+                                      ],
+                                      "span": "1:990-995"
+                                    },
+                                    {
+                                      "Ident": [
+                                        "space_el"
+                                      ],
+                                      "span": "1:997-1005"
+                                    },
+                                    {
+                                      "Ident": [
+                                        "content_el"
+                                      ],
+                                      "span": "1:1007-1017"
+                                    },
+                                    {
+                                      "Ident": [
+                                        "parent_label_el"
+                                      ],
+                                      "span": "1:1019-1034"
+                                    },
+                                    {
+                                      "Ident": [
+                                        "parent_el"
+                                      ],
+                                      "span": "1:1036-1045"
+                                    },
+                                    {
+                                      "Ident": [
+                                        "badge_el"
+                                      ],
+                                      "span": "1:1047-1055"
+                                    }
+                                  ],
+                                  "span": "1:976-1056"
+                                }
+                              }
+                            },
+                            "alias": "row_el",
+                            "span": "1:962-1057"
+                          },
+                          {
+                            "FuncCall": {
+                              "args": [],
+                              "name": {
+                                "Ident": [
+                                  "ui_list"
+                                ],
+                                "span": "1:1078-1085"
+                              },
+                              "named_args": {
+                                "hierarchical_sort": {
+                                  "Array": [
+                                    {
+                                      "Ident": [
+                                        "parent_id"
+                                      ],
+                                      "span": "1:1114-1123"
+                                    },
+                                    {
+                                      "Ident": [
+                                        "sort_key"
+                                      ],
+                                      "span": "1:1125-1133"
+                                    }
+                                  ],
+                                  "span": "1:1113-1134"
+                                },
+                                "item_template": {
+                                  "Ident": [
+                                    "row_el"
+                                  ],
+                                  "span": "1:1149-1155"
+                                },
+                                "rel": {
+                                  "Ident": [
+                                    "this"
+                                  ],
+                                  "span": "1:1090-1094"
+                                }
+                              }
+                            },
+                            "alias": "list_output",
+                            "span": "1:1077-1156"
+                          },
+                          {
+                            "FuncCall": {
+                              "args": [],
+                              "name": {
+                                "Ident": [
+                                  "ui_render"
+                                ],
+                                "span": "1:1179-1188"
+                              },
+                              "named_args": {
+                                "rel": {
+                                  "Ident": [
+                                    "list_output"
+                                  ],
+                                  "span": "1:1193-1204"
+                                }
+                              }
+                            },
+                            "alias": "render_output",
+                            "span": "1:1178-1205"
+                          }
+                        ],
+                        "span": "1:567-1207"
+                      }
+                    ],
+                    "name": {
+                      "Ident": [
+                        "derive"
+                      ],
+                      "span": "1:560-566"
+                    }
+                  },
+                  "span": "1:560-1207"
+                },
+                {
+                  "FuncCall": {
+                    "args": [
+                      {
+                        "Ident": [
+                          "render_output"
+                        ],
+                        "span": "1:1215-1228"
+                      }
+                    ],
+                    "name": {
+                      "Ident": [
+                        "select"
+                      ],
+                      "span": "1:1208-1214"
+                    }
+                  },
+                  "span": "1:1208-1228"
+                }
+              ]
+            },
+            "span": "1:431-1228"
+          }
+        },
+        "span": "1:429-1228"
+      }
+    ]
+  },
+  "frames": [
+    [
+      "1:443-559",
+      {
+        "columns": [
+          {
+            "Single": {
+              "name": [
+                "blocks",
+                "id"
+              ],
+              "target_id": 129,
+              "target_name": null
+            }
+          },
+          {
+            "Single": {
+              "name": [
+                "blocks",
+                "parent_id"
+              ],
+              "target_id": 130,
+              "target_name": null
+            }
+          },
+          {
+            "Single": {
+              "name": [
+                "blocks",
+                "depth"
+              ],
+              "target_id": 131,
+              "target_name": null
+            }
+          },
+          {
+            "Single": {
+              "name": [
+                "blocks",
+                "sort_key"
+              ],
+              "target_id": 132,
+              "target_name": null
+            }
+          },
+          {
+            "Single": {
+              "name": [
+                "blocks",
+                "content"
+              ],
+              "target_id": 133,
+              "target_name": null
+            }
+          },
+          {
+            "Single": {
+              "name": [
+                "blocks",
+                "completed"
+              ],
+              "target_id": 134,
+              "target_name": null
+            }
+          },
+          {
+            "Single": {
+              "name": [
+                "blocks",
+                "block_type"
+              ],
+              "target_id": 135,
+              "target_name": null
+            }
+          },
+          {
+            "Single": {
+              "name": [
+                "blocks",
+                "collapsed"
+              ],
+              "target_id": 136,
+              "target_name": null
+            }
+          }
+        ],
+        "inputs": [
+          {
+            "id": 127,
+            "name": "blocks",
+            "table": [
+              "default_db",
+              "blocks"
+            ]
+          }
+        ]
+      }
+    ],
+    [
+      "1:560-1207",
+      {
+        "columns": [
+          {
+            "Single": {
+              "name": null,
+              "target_id": 129,
+              "target_name": null
+            }
+          },
+          {
+            "Single": {
+              "name": null,
+              "target_id": 130,
+              "target_name": null
+            }
+          },
+          {
+            "Single": {
+              "name": null,
+              "target_id": 131,
+              "target_name": null
+            }
+          },
+          {
+            "Single": {
+              "name": null,
+              "target_id": 132,
+              "target_name": null
+            }
+          },
+          {
+            "Single": {
+              "name": null,
+              "target_id": 133,
+              "target_name": null
+            }
+          },
+          {
+            "Single": {
+              "name": null,
+              "target_id": 134,
+              "target_name": null
+            }
+          },
+          {
+            "Single": {
+              "name": null,
+              "target_id": 135,
+              "target_name": null
+            }
+          },
+          {
+            "Single": {
+              "name": null,
+              "target_id": 136,
+              "target_name": null
+            }
+          },
+          {
+            "Single": {
+              "name": null,
+              "target_id": 141,
+              "target_name": null
+            }
+          },
+          {
+            "Single": {
+              "name": null,
+              "target_id": 145,
+              "target_name": null
+            }
+          },
+          {
+            "Single": {
+              "name": null,
+              "target_id": 149,
+              "target_name": null
+            }
+          },
+          {
+            "Single": {
+              "name": null,
+              "target_id": 153,
+              "target_name": null
+            }
+          },
+          {
+            "Single": {
+              "name": null,
+              "target_id": 157,
+              "target_name": null
+            }
+          },
+          {
+            "Single": {
+              "name": null,
+              "target_id": 161,
+              "target_name": null
+            }
+          },
+          {
+            "Single": {
+              "name": null,
+              "target_id": 165,
+              "target_name": null
+            }
+          },
+          {
+            "Single": {
+              "name": null,
+              "target_id": 170,
+              "target_name": null
+            }
+          },
+          {
+            "Single": {
+              "name": [
+                "parent_el"
+              ],
+              "target_id": 182,
+              "target_name": null
+            }
+          },
+          {
+            "Single": {
+              "name": [
+                "content_el"
+              ],
+              "target_id": 183,
+              "target_name": null
+            }
+          },
+          {
+            "Single": {
+              "name": [
+                "id_el"
+              ],
+              "target_id": 184,
+              "target_name": null
+            }
+          },
+          {
+            "Single": {
+              "name": [
+                "badge_el"
+              ],
+              "target_id": 185,
+              "target_name": null
+            }
+          },
+          {
+            "Single": {
+              "name": [
+                "blocks",
+                "id"
+              ],
+              "target_id": 186,
+              "target_name": null
+            }
+          },
+          {
+            "Single": {
+              "name": [
+                "blocks",
+                "parent_id"
+              ],
+              "target_id": 187,
+              "target_name": null
+            }
+          },
+          {
+            "Single": {
+              "name": [
+                "blocks",
+                "depth"
+              ],
+              "target_id": 188,
+              "target_name": null
+            }
+          },
+          {
+            "Single": {
+              "name": [
+                "blocks",
+                "sort_key"
+              ],
+              "target_id": 189,
+              "target_name": null
+            }
+          },
+          {
+            "Single": {
+              "name": [
+                "blocks",
+                "content"
+              ],
+              "target_id": 190,
+              "target_name": null
+            }
+          },
+          {
+            "Single": {
+              "name": [
+                "blocks",
+                "completed"
+              ],
+              "target_id": 191,
+              "target_name": null
+            }
+          },
+          {
+            "Single": {
+              "name": [
+                "blocks",
+                "block_type"
+              ],
+              "target_id": 192,
+              "target_name": null
+            }
+          },
+          {
+            "Single": {
+              "name": [
+                "blocks",
+                "collapsed"
+              ],
+              "target_id": 193,
+              "target_name": null
+            }
+          },
+          {
+            "Single": {
+              "name": [
+                "parent_label_el"
+              ],
+              "target_id": 195,
+              "target_name": null
+            }
+          },
+          {
+            "Single": {
+              "name": [
+                "checkbox_el"
+              ],
+              "target_id": 196,
+              "target_name": null
+            }
+          },
+          {
+            "Single": {
+              "name": [
+                "row_el"
+              ],
+              "target_id": 197,
+              "target_name": null
+            }
+          },
+          {
+            "Single": {
+              "name": [
+                "space_el"
+              ],
+              "target_id": 198,
+              "target_name": null
+            }
+          },
+          {
+            "Single": {
+              "name": [
+                "render_output"
+              ],
+              "target_id": 206,
+              "target_name": null
+            }
+          }
+        ],
+        "inputs": [
+          {
+            "id": 127,
+            "name": "blocks",
+            "table": [
+              "default_db",
+              "blocks"
+            ]
+          }
+        ]
+      }
+    ],
+    [
+      "1:1208-1228",
+      {
+        "columns": [
+          {
+            "Single": {
+              "name": [
+                "render_output"
+              ],
+              "target_id": 210,
+              "target_name": null
+            }
+          }
+        ],
+        "inputs": [
+          {
+            "id": 127,
+            "name": "blocks",
+            "table": [
+              "default_db",
+              "blocks"
+            ]
+          }
+        ]
+      }
+    ]
+  ],
+  "nodes": [
+    {
+      "id": 127,
+      "ident": {
+        "Ident": [
+          "default_db",
+          "blocks"
+        ]
+      },
+      "kind": "Ident",
+      "parent": 138,
+      "span": "1:431-442"
+    },
+    {
+      "id": 129,
+      "ident": {
+        "Ident": [
+          "this",
+          "blocks",
+          "id"
+        ]
+      },
+      "kind": "Ident",
+      "parent": 137,
+      "span": "1:456-458",
+      "targets": [
+        127
+      ]
+    },
+    {
+      "id": 130,
+      "ident": {
+        "Ident": [
+          "this",
+          "blocks",
+          "parent_id"
+        ]
+      },
+      "kind": "Ident",
+      "parent": 137,
+      "span": "1:464-473",
+      "targets": [
+        127
+      ]
+    },
+    {
+      "id": 131,
+      "ident": {
+        "Ident": [
+          "this",
+          "blocks",
+          "depth"
+        ]
+      },
+      "kind": "Ident",
+      "parent": 137,
+      "span": "1:479-484",
+      "targets": [
+        127
+      ]
+    },
+    {
+      "id": 132,
+      "ident": {
+        "Ident": [
+          "this",
+          "blocks",
+          "sort_key"
+        ]
+      },
+      "kind": "Ident",
+      "parent": 137,
+      "span": "1:490-498",
+      "targets": [
+        127
+      ]
+    },
+    {
+      "id": 133,
+      "ident": {
+        "Ident": [
+          "this",
+          "blocks",
+          "content"
+        ]
+      },
+      "kind": "Ident",
+      "parent": 137,
+      "span": "1:504-511",
+      "targets": [
+        127
+      ]
+    },
+    {
+      "id": 134,
+      "ident": {
+        "Ident": [
+          "this",
+          "blocks",
+          "completed"
+        ]
+      },
+      "kind": "Ident",
+      "parent": 137,
+      "span": "1:517-526",
+      "targets": [
+        127
+      ]
+    },
+    {
+      "id": 135,
+      "ident": {
+        "Ident": [
+          "this",
+          "blocks",
+          "block_type"
+        ]
+      },
+      "kind": "Ident",
+      "parent": 137,
+      "span": "1:532-542",
+      "targets": [
+        127
+      ]
+    },
+    {
+      "id": 136,
+      "ident": {
+        "Ident": [
+          "this",
+          "blocks",
+          "collapsed"
+        ]
+      },
+      "kind": "Ident",
+      "parent": 137,
+      "span": "1:548-557",
+      "targets": [
+        127
+      ]
+    },
+    {
+      "children": [
+        129,
+        130,
+        131,
+        132,
+        133,
+        134,
+        135,
+        136
+      ],
+      "id": 137,
+      "kind": "Tuple",
+      "parent": 138,
+      "span": "1:450-559"
+    },
+    {
+      "children": [
+        127,
+        137
+      ],
+      "id": 138,
+      "kind": "TransformCall: Select",
+      "parent": 209,
+      "span": "1:443-559"
+    },
+    {
+      "alias": "checkbox_el",
+      "id": 141,
+      "ident": {
+        "Ident": [
+          "this",
+          "blocks",
+          "completed"
+        ]
+      },
+      "kind": "Ident",
+      "parent": 208,
+      "span": "1:587-623",
+      "targets": [
+        134
+      ]
+    },
+    {
+      "alias": "id_el",
+      "id": 145,
+      "ident": {
+        "Ident": [
+          "this",
+          "blocks",
+          "id"
+        ]
+      },
+      "kind": "Ident",
+      "parent": 208,
+      "span": "1:637-667",
+      "targets": [
+        129
+      ]
+    },
+    {
+      "alias": "space_el",
+      "id": 149,
+      "kind": "Literal",
+      "parent": 208,
+      "span": "1:684-710"
+    },
+    {
+      "alias": "content_el",
+      "id": 153,
+      "ident": {
+        "Ident": [
+          "this",
+          "blocks",
+          "content"
+        ]
+      },
+      "kind": "Ident",
+      "parent": 208,
+      "span": "1:729-764",
+      "targets": [
+        133
+      ]
+    },
+    {
+      "alias": "parent_label_el",
+      "id": 157,
+      "kind": "Literal",
+      "parent": 208,
+      "span": "1:788-822"
+    },
+    {
+      "alias": "parent_el",
+      "id": 161,
+      "ident": {
+        "Ident": [
+          "this",
+          "blocks",
+          "parent_id"
+        ]
+      },
+      "kind": "Ident",
+      "parent": 208,
+      "span": "1:840-877",
+      "targets": [
+        130
+      ]
+    },
+    {
+      "alias": "badge_el",
+      "id": 165,
+      "ident": {
+        "Ident": [
+          "this",
+          "blocks",
+          "block_type"
+        ]
+      },
+      "kind": "Ident",
+      "parent": 208,
+      "span": "1:894-947",
+      "targets": [
+        135
+      ]
+    },
+    {
+      "alias": "row_el",
+      "children": [
+        171,
+        172,
+        173,
+        174,
+        175,
+        176,
+        177
+      ],
+      "id": 170,
+      "kind": "Array",
+      "parent": 208,
+      "span": "1:962-1057"
+    },
+    {
+      "id": 171,
+      "ident": {
+        "Ident": [
+          "this",
+          "checkbox_el"
+        ]
+      },
+      "kind": "Ident",
+      "parent": 170,
+      "span": "1:977-988",
+      "targets": [
+        141
+      ]
+    },
+    {
+      "id": 172,
+      "ident": {
+        "Ident": [
+          "this",
+          "id_el"
+        ]
+      },
+      "kind": "Ident",
+      "parent": 170,
+      "span": "1:990-995",
+      "targets": [
+        145
+      ]
+    },
+    {
+      "id": 173,
+      "ident": {
+        "Ident": [
+          "this",
+          "space_el"
+        ]
+      },
+      "kind": "Ident",
+      "parent": 170,
+      "span": "1:997-1005",
+      "targets": [
+        149
+      ]
+    },
+    {
+      "id": 174,
+      "ident": {
+        "Ident": [
+          "this",
+          "content_el"
+        ]
+      },
+      "kind": "Ident",
+      "parent": 170,
+      "span": "1:1007-1017",
+      "targets": [
+        153
+      ]
+    },
+    {
+      "id": 175,
+      "ident": {
+        "Ident": [
+          "this",
+          "parent_label_el"
+        ]
+      },
+      "kind": "Ident",
+      "parent": 170,
+      "span": "1:1019-1034",
+      "targets": [
+        157
+      ]
+    },
+    {
+      "id": 176,
+      "ident": {
+        "Ident": [
+          "this",
+          "parent_el"
+        ]
+      },
+      "kind": "Ident",
+      "parent": 170,
+      "span": "1:1036-1045",
+      "targets": [
+        161
+      ]
+    },
+    {
+      "id": 177,
+      "ident": {
+        "Ident": [
+          "this",
+          "badge_el"
+        ]
+      },
+      "kind": "Ident",
+      "parent": 170,
+      "span": "1:1047-1055",
+      "targets": [
+        165
+      ]
+    },
+    {
+      "alias": "list_output",
+      "children": [
+        182,
+        183,
+        184,
+        185,
+        194,
+        195,
+        196,
+        197,
+        198
+      ],
+      "id": 181,
+      "kind": "Tuple",
+      "parent": 208,
+      "span": "1:1077-1156"
+    },
+    {
+      "id": 182,
+      "ident": {
+        "Ident": [
+          "this",
+          "parent_el"
+        ]
+      },
+      "kind": "Ident",
+      "parent": 181,
+      "targets": [
+        161
+      ]
+    },
+    {
+      "id": 183,
+      "ident": {
+        "Ident": [
+          "this",
+          "content_el"
+        ]
+      },
+      "kind": "Ident",
+      "parent": 181,
+      "targets": [
+        153
+      ]
+    },
+    {
+      "id": 184,
+      "ident": {
+        "Ident": [
+          "this",
+          "id_el"
+        ]
+      },
+      "kind": "Ident",
+      "parent": 181,
+      "targets": [
+        145
+      ]
+    },
+    {
+      "id": 185,
+      "ident": {
+        "Ident": [
+          "this",
+          "badge_el"
+        ]
+      },
+      "kind": "Ident",
+      "parent": 181,
+      "targets": [
+        165
+      ]
+    },
+    {
+      "id": 186,
+      "ident": {
+        "Ident": [
+          "this",
+          "blocks",
+          "id"
+        ]
+      },
+      "kind": "Ident",
+      "parent": 194,
+      "targets": [
+        129
+      ]
+    },
+    {
+      "id": 187,
+      "ident": {
+        "Ident": [
+          "this",
+          "blocks",
+          "parent_id"
+        ]
+      },
+      "kind": "Ident",
+      "parent": 194,
+      "targets": [
+        130
+      ]
+    },
+    {
+      "id": 188,
+      "ident": {
+        "Ident": [
+          "this",
+          "blocks",
+          "depth"
+        ]
+      },
+      "kind": "Ident",
+      "parent": 194,
+      "targets": [
+        131
+      ]
+    },
+    {
+      "id": 189,
+      "ident": {
+        "Ident": [
+          "this",
+          "blocks",
+          "sort_key"
+        ]
+      },
+      "kind": "Ident",
+      "parent": 194,
+      "targets": [
+        132
+      ]
+    },
+    {
+      "id": 190,
+      "ident": {
+        "Ident": [
+          "this",
+          "blocks",
+          "content"
+        ]
+      },
+      "kind": "Ident",
+      "parent": 194,
+      "targets": [
+        133
+      ]
+    },
+    {
+      "id": 191,
+      "ident": {
+        "Ident": [
+          "this",
+          "blocks",
+          "completed"
+        ]
+      },
+      "kind": "Ident",
+      "parent": 194,
+      "targets": [
+        134
+      ]
+    },
+    {
+      "id": 192,
+      "ident": {
+        "Ident": [
+          "this",
+          "blocks",
+          "block_type"
+        ]
+      },
+      "kind": "Ident",
+      "parent": 194,
+      "targets": [
+        135
+      ]
+    },
+    {
+      "id": 193,
+      "ident": {
+        "Ident": [
+          "this",
+          "blocks",
+          "collapsed"
+        ]
+      },
+      "kind": "Ident",
+      "parent": 194,
+      "targets": [
+        136
+      ]
+    },
+    {
+      "alias": "blocks",
+      "children": [
+        186,
+        187,
+        188,
+        189,
+        190,
+        191,
+        192,
+        193
+      ],
+      "id": 194,
+      "kind": "Tuple",
+      "parent": 181
+    },
+    {
+      "id": 195,
+      "ident": {
+        "Ident": [
+          "this",
+          "parent_label_el"
+        ]
+      },
+      "kind": "Ident",
+      "parent": 181,
+      "targets": [
+        157
+      ]
+    },
+    {
+      "id": 196,
+      "ident": {
+        "Ident": [
+          "this",
+          "checkbox_el"
+        ]
+      },
+      "kind": "Ident",
+      "parent": 181,
+      "targets": [
+        141
+      ]
+    },
+    {
+      "id": 197,
+      "ident": {
+        "Ident": [
+          "this",
+          "row_el"
+        ]
+      },
+      "kind": "Ident",
+      "parent": 181,
+      "targets": [
+        170
+      ]
+    },
+    {
+      "id": 198,
+      "ident": {
+        "Ident": [
+          "this",
+          "space_el"
+        ]
+      },
+      "kind": "Ident",
+      "parent": 181,
+      "targets": [
+        149
+      ]
+    },
+    {
+      "alias": "render_output",
+      "id": 206,
+      "ident": {
+        "Ident": [
+          "this",
+          "list_output"
+        ]
+      },
+      "kind": "Ident",
+      "parent": 208,
+      "span": "1:1178-1205",
+      "targets": [
+        181
+      ]
+    },
+    {
+      "children": [
+        141,
+        145,
+        149,
+        153,
+        157,
+        161,
+        165,
+        170,
+        181,
+        206
+      ],
+      "id": 208,
+      "kind": "Tuple",
+      "parent": 209,
+      "span": "1:567-1207"
+    },
+    {
+      "children": [
+        138,
+        208
+      ],
+      "id": 209,
+      "kind": "TransformCall: Derive",
+      "parent": 212,
+      "span": "1:560-1207"
+    },
+    {
+      "id": 210,
+      "ident": {
+        "Ident": [
+          "this",
+          "render_output"
+        ]
+      },
+      "kind": "Ident",
+      "parent": 211,
+      "span": "1:1215-1228",
+      "targets": [
+        206
+      ]
+    },
+    {
+      "children": [
+        210
+      ],
+      "id": 211,
+      "kind": "Tuple",
+      "parent": 212,
+      "span": "1:1215-1228"
+    },
+    {
+      "children": [
+        209,
+        211
+      ],
+      "id": 212,
+      "kind": "TransformCall: Select",
+      "span": "1:1208-1228"
+    }
+  ]
+}

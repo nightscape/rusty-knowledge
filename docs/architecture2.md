@@ -109,7 +109,7 @@ use chrono::{DateTime, Utc};
 use sqlx::{
     sqlite::{SqliteArguments, SqliteRow},
     types::Json,
-    Query, Row, Sqlite, SqlitePool,
+    Query, Row, Sqlite, libsql::Database,
 };
 use std::{collections::HashMap, marker::PhantomData, sync::Arc};
 
@@ -329,7 +329,6 @@ fn bind_all<'q>(
     }
     query
 }
-```
 ```
 
 **Implementations:**
@@ -797,7 +796,7 @@ where
     T: Serialize + serde::de::DeserializeOwned + Clone + Send + Sync + HasSchema,
 {
     source: S,
-    cache: SqlitePool,
+    cache: libsql::Database,
     schema: Schema,
     _phantom: PhantomData<T>,
 }
@@ -808,7 +807,7 @@ where
     T: Serialize + serde::de::DeserializeOwned + Clone + Send + Sync + HasSchema,
 {
     async fn new(source: S, cache_db: &str) -> Result<Self> {
-        let cache = SqlitePool::connect(cache_db).await?;
+        let cache = libsql::Database::connect(cache_db).await?;
         let schema = T::schema(); // Macro-derived
 
         // Create cache table from schema
@@ -1585,7 +1584,7 @@ enum StorageError {
 
 ### Phase 2: QueryableCache
 1. Implement QueryableCache wrapper
-2. Add SQLite table generation from schema
+2. Add Turso table generation from schema
 3. Implement sync logic
 4. Add SQL compilation for predicates
 5. Add in-memory fallback

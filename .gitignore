@@ -9,3 +9,6 @@ node_modules/
 dist/
 *.log
 package-lock.json
+
+*.db
+*.db-wal

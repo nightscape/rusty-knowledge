@@ -3,9 +3,10 @@
 //! This module provides a CRDT-backed implementation using Loro with a normalized
 //! adjacency-list data model for hierarchical blocks.
 
-use super::repository::{ChangeNotifications, CoreOperations, Lifecycle, P2POperations};
+use super::repository::{CoreOperations, Lifecycle, P2POperations};
+use super::streaming::{ChangeNotifications, ChangeSubscribers, Change, ChangeOrigin, StreamPosition};
 use super::types::{
-    ApiError, Block, BlockChange, BlockMetadata, ChangeOrigin, NewBlock, StreamPosition,
+    ApiError, Block, BlockMetadata, NewBlock,
 };
 use crate::sync::CollaborativeDoc;
 use async_trait::async_trait;
@@ -16,8 +17,6 @@ use tokio::sync::mpsc;
 use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
 use uuid::Uuid;
 
-/// Type alias for change notification subscribers
-type ChangeSubscribers = Arc<Mutex<Vec<mpsc::Sender<Result<BlockChange, ApiError>>>>>;
 
 /// Helper trait for collecting and searching values in Loro containers
 trait LoroListExt {
@@ -108,9 +107,9 @@ pub struct LoroBackend {
     /// Document ID
     doc_id: String,
     /// Active change notification subscribers
-    subscribers: ChangeSubscribers,
+    subscribers: ChangeSubscribers<Block>,
     /// In-memory log of emitted changes for late subscribers
-    event_log: Arc<Mutex<Vec<BlockChange>>>,
+    event_log: Arc<Mutex<Vec<Change<Block>>>>,
 }
 
 impl Clone for LoroBackend {
@@ -144,10 +143,16 @@ impl LoroBackend {
     }
 
     /// Emit a change to all subscribers and record it for late listeners.
-    pub(crate) fn emit_change(&self, change: BlockChange) {
+    /// Sends the change as a single-item batch.
+    /// Note: This spawns a task to avoid blocking on async lock.
+    pub(crate) fn emit_change(&self, change: Change<Block>) {
         self.event_log.lock().unwrap().push(change.clone());
-        let mut subscribers = self.subscribers.lock().unwrap();
-        subscribers.retain(|sender| sender.try_send(Ok(change.clone())).is_ok());
+        let batch = vec![change];
+        let subscribers = self.subscribers.clone();
+        tokio::spawn(async move {
+            let mut subscribers = subscribers.lock().await;
+            subscribers.retain(|sender| sender.try_send(Ok(batch.clone())).is_ok());
+        });
     }
 
     /// Helper to get a block's LoroMap from the blocks_by_id map
@@ -269,6 +274,25 @@ impl LoroBackend {
                 root_map.insert("created_at", loro::LoroValue::from(now))?;
                 root_map.insert("updated_at", loro::LoroValue::from(now))?;
 
+                // Create a default first child block so the UI has something to display
+                let first_block_id = Self::generate_block_id();
+                let first_block_map = blocks_map
+                    .insert_container(&first_block_id, loro::LoroMap::new())?;
+
+                first_block_map.insert_container("content", loro::LoroText::new())?;
+                first_block_map.insert(
+                    "parent_id",
+                    loro::LoroValue::from(super::types::ROOT_PARENT_ID),
+                )?;
+                first_block_map.insert("created_at", loro::LoroValue::from(now))?;
+                first_block_map.insert("updated_at", loro::LoroValue::from(now))?;
+
+                // Add the first block as a child of root
+                let children_map = doc.get_map(Self::CHILDREN_BY_PARENT);
+                let root_children = children_map
+                    .insert_container(super::types::ROOT_PARENT_ID, loro::LoroList::new())?;
+                root_children.push(loro::LoroValue::from(first_block_id.as_str()))?;
+
                 // Set schema version for future migrations
                 let meta = doc.get_map("_meta");
                 meta.insert(Self::SCHEMA_VERSION, loro::LoroValue::from(1i64))?;
@@ -303,7 +327,7 @@ impl Lifecycle for LoroBackend {
         Ok(Self {
             collab_doc,
             doc_id,
-            subscribers: Arc::new(Mutex::new(Vec::new())),
+            subscribers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             event_log: Arc::new(Mutex::new(Vec::new())),
         })
     }
@@ -325,17 +349,17 @@ impl Lifecycle for LoroBackend {
 
 // ChangeNotifications trait implementation
 #[async_trait]
-impl ChangeNotifications for LoroBackend {
+impl ChangeNotifications<Block> for LoroBackend {
     async fn watch_changes_since(
         &self,
         position: StreamPosition,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<BlockChange, ApiError>> + Send>>, ApiError> {
+    ) -> Pin<Box<dyn Stream<Item = std::result::Result<Vec<Change<Block>>, ApiError>> + Send>> {
         // Collect replay items synchronously
         let mut replay_items = Vec::new();
 
         // If position is Beginning, collect all current blocks as Created events first
         if matches!(position, StreamPosition::Beginning) {
-            let current_blocks = self
+            match self
                 .collab_doc
                 .with_read(|doc| {
                     let blocks_map = doc.get_map(Self::BLOCKS_BY_ID);
@@ -409,14 +433,23 @@ impl ChangeNotifications for LoroBackend {
                 .await
                 .map_err(|e| ApiError::InternalError {
                     message: format!("Failed to get current blocks: {}", e),
-                })?;
-
-            // Collect current blocks as replay items
-            for block in current_blocks {
-                replay_items.push(BlockChange::Created {
-                    block,
-                    origin: ChangeOrigin::Remote,
-                });
+                }) {
+                Ok(current_blocks) => {
+                    // Collect current blocks as replay items
+                    for block in current_blocks {
+                        replay_items.push(Change::Created {
+                            data: block,
+                            origin: ChangeOrigin::Remote,
+                        });
+                    }
+                }
+                Err(e) => {
+                    // Return error as first item in stream
+                    let error_stream = tokio_stream::iter(vec![Err(e)]);
+                    let (_tx, rx) = mpsc::channel::<std::result::Result<Vec<Change<Block>>, ApiError>>(100);
+                    let live_stream = ReceiverStream::new(rx);
+                    return Box::pin(error_stream.chain(live_stream));
+                }
             }
         }
 
@@ -425,24 +458,29 @@ impl ChangeNotifications for LoroBackend {
         replay_items.extend(backlog);
 
         // Create channel for live updates
-        let (tx, rx) = mpsc::channel::<Result<BlockChange, ApiError>>(100);
+        let (tx, rx) = mpsc::channel::<std::result::Result<Vec<Change<Block>>, ApiError>>(100);
 
         // Subscribe to future changes
         {
-            let mut subscribers = self.subscribers.lock().unwrap();
+            let mut subscribers = self.subscribers.lock().await;
             subscribers.push(tx);
         }
 
-        // Create a stream that first yields replay items, then live updates
+        // Create a stream that first yields replay items as a batch, then live updates
         // This avoids spawning tasks which can cause runtime deadlocks when used with block_on
-        let replay_stream = tokio_stream::iter(replay_items.into_iter().map(Ok));
+        let replay_batch = if replay_items.is_empty() {
+            vec![]
+        } else {
+            vec![replay_items]
+        };
+        let replay_stream = tokio_stream::iter(replay_batch.into_iter().map(Ok));
         let live_stream = ReceiverStream::new(rx);
         let combined = replay_stream.chain(live_stream);
 
-        Ok(Box::pin(combined))
+        Box::pin(combined)
     }
 
-    async fn get_current_version(&self) -> Result<Vec<u8>, ApiError> {
+    async fn get_current_version(&self) -> std::result::Result<Vec<u8>, ApiError> {
         self.collab_doc
             .with_read(|doc| Ok(doc.export(loro::ExportMode::Snapshot)?))
             .await
@@ -715,8 +753,8 @@ impl CoreOperations for LoroBackend {
                 }
             })?;
 
-        self.emit_change(BlockChange::Created {
-            block: created_block.clone(),
+        self.emit_change(Change::Created {
+            data: created_block.clone(),
             origin: ChangeOrigin::Local,
         });
 
@@ -725,6 +763,9 @@ impl CoreOperations for LoroBackend {
 
     async fn update_block(&self, id: &str, content: String) -> Result<(), ApiError> {
         let content_for_doc = content.clone();
+        // Read block data before updating to get parent_id and children
+        let block_before = self.get_block(id).await?;
+
         self.collab_doc
             .with_write(|doc| {
                 let blocks_map = doc.get_map(Self::BLOCKS_BY_ID);
@@ -755,9 +796,15 @@ impl CoreOperations for LoroBackend {
                 message: format!("Failed to update block: {}", e),
             })?;
 
-        self.emit_change(BlockChange::Updated {
+        self.emit_change(Change::Updated {
             id: id.to_string(),
-            content,
+            data: Block {
+                id: id.to_string(),
+                parent_id: block_before.parent_id.clone(),
+                content: content.clone(),
+                children: block_before.children.clone(),
+                metadata: block_before.metadata.clone(),
+            },
             origin: ChangeOrigin::Local,
         });
 
@@ -795,7 +842,7 @@ impl CoreOperations for LoroBackend {
                 message: format!("Failed to delete block: {}", e),
             })?;
 
-        self.emit_change(BlockChange::Deleted {
+        self.emit_change(Change::Deleted {
             id: id.to_string(),
             origin: ChangeOrigin::Local,
         });
@@ -811,6 +858,9 @@ impl CoreOperations for LoroBackend {
     ) -> Result<(), ApiError> {
         let new_parent_for_notify = new_parent.clone();
         let after_for_notify = after.clone();
+
+        // Read block data before moving to get content and children
+        let block_before = self.get_block(id).await?;
 
         self.collab_doc
             .with_write(|doc| {
@@ -855,10 +905,15 @@ impl CoreOperations for LoroBackend {
                 message: format!("Failed to move block: {}", e),
             })?;
 
-        self.emit_change(BlockChange::Moved {
+        self.emit_change(Change::Updated {
             id: id.to_string(),
-            new_parent: new_parent_for_notify,
-            after: after_for_notify,
+            data: Block {
+                id: id.to_string(),
+                parent_id: new_parent_for_notify,
+                content: block_before.content.clone(),
+                children: block_before.children.clone(),
+                metadata: block_before.metadata.clone(),
+            },
             origin: ChangeOrigin::Local,
         });
 
@@ -976,8 +1031,8 @@ impl CoreOperations for LoroBackend {
             })?;
 
         for block in &created_blocks {
-            self.emit_change(BlockChange::Created {
-                block: block.clone(),
+            self.emit_change(Change::Created {
+                data: block.clone(),
                 origin: ChangeOrigin::Local,
             });
         }
@@ -1023,7 +1078,7 @@ impl CoreOperations for LoroBackend {
             })?;
 
         for id in unique_ids {
-            self.emit_change(BlockChange::Deleted {
+            self.emit_change(Change::Deleted {
                 id,
                 origin: ChangeOrigin::Local,
             });

@@ -1,7 +1,10 @@
 use std::sync::Arc;
+use std::collections::HashMap;
 
-use crate::core::traits::{DataSource, Queryable, Result};
+use crate::core::datasource::{DataSource, CrudOperationProvider};
+use crate::core::traits::{Queryable, Result};
 use crate::core::{AlwaysTrue, Predicate, QueryableCache, UnifiedQuery};
+use crate::storage::types::Value;
 use crate::integrations::todoist::TodoistTask;
 use crate::storage::task_datasource::InMemoryTaskStore;
 use crate::tasks::Task;
@@ -143,27 +146,18 @@ mod tests {
     #[tokio::test]
     async fn test_unified_query_across_sources() {
         let internal_store = InMemoryTaskStore::new();
-        internal_store
-            .insert(Task {
-                id: "1".to_string(),
-                title: "Internal Task 1".to_string(),
-                completed: false,
-                parent_id: None,
-                children: vec![],
-            })
-            .await
-            .unwrap();
 
-        internal_store
-            .insert(Task {
-                id: "2".to_string(),
-                title: "Internal Task 2".to_string(),
-                completed: true,
-                parent_id: None,
-                children: vec![],
-            })
-            .await
-            .unwrap();
+        let mut fields1 = HashMap::new();
+        fields1.insert("id".to_string(), Value::String("1".to_string()));
+        fields1.insert("title".to_string(), Value::String("Internal Task 1".to_string()));
+        fields1.insert("completed".to_string(), Value::Boolean(false));
+        internal_store.create(fields1).await.unwrap();
+
+        let mut fields2 = HashMap::new();
+        fields2.insert("id".to_string(), Value::String("2".to_string()));
+        fields2.insert("title".to_string(), Value::String("Internal Task 2".to_string()));
+        fields2.insert("completed".to_string(), Value::Boolean(true));
+        internal_store.create(fields2).await.unwrap();
 
         let internal_cache = Arc::new(
             QueryableCache::with_database(internal_store, ":memory:")
@@ -189,27 +183,18 @@ mod tests {
     #[tokio::test]
     async fn test_unified_query_with_title_search() {
         let internal_store = InMemoryTaskStore::new();
-        internal_store
-            .insert(Task {
-                id: "1".to_string(),
-                title: "Buy groceries".to_string(),
-                completed: false,
-                parent_id: None,
-                children: vec![],
-            })
-            .await
-            .unwrap();
 
-        internal_store
-            .insert(Task {
-                id: "2".to_string(),
-                title: "Write report".to_string(),
-                completed: false,
-                parent_id: None,
-                children: vec![],
-            })
-            .await
-            .unwrap();
+        let mut fields1 = HashMap::new();
+        fields1.insert("id".to_string(), Value::String("1".to_string()));
+        fields1.insert("title".to_string(), Value::String("Buy groceries".to_string()));
+        fields1.insert("completed".to_string(), Value::Boolean(false));
+        internal_store.create(fields1).await.unwrap();
+
+        let mut fields2 = HashMap::new();
+        fields2.insert("id".to_string(), Value::String("2".to_string()));
+        fields2.insert("title".to_string(), Value::String("Write report".to_string()));
+        fields2.insert("completed".to_string(), Value::Boolean(false));
+        internal_store.create(fields2).await.unwrap();
 
         let internal_cache = Arc::new(
             QueryableCache::with_database(internal_store, ":memory:")
@@ -236,39 +221,26 @@ mod tests {
     #[tokio::test]
     async fn test_unified_query_dedup() {
         let internal_store1 = InMemoryTaskStore::new();
-        internal_store1
-            .insert(Task {
-                id: "shared-1".to_string(),
-                title: "Shared Task".to_string(),
-                completed: false,
-                parent_id: None,
-                children: vec![],
-            })
-            .await
-            .unwrap();
+
+        let mut fields1 = HashMap::new();
+        fields1.insert("id".to_string(), Value::String("shared-1".to_string()));
+        fields1.insert("title".to_string(), Value::String("Shared Task".to_string()));
+        fields1.insert("completed".to_string(), Value::Boolean(false));
+        internal_store1.create(fields1).await.unwrap();
 
         let internal_store2 = InMemoryTaskStore::new();
-        internal_store2
-            .insert(Task {
-                id: "shared-1".to_string(),
-                title: "Shared Task (duplicate)".to_string(),
-                completed: false,
-                parent_id: None,
-                children: vec![],
-            })
-            .await
-            .unwrap();
 
-        internal_store2
-            .insert(Task {
-                id: "unique-2".to_string(),
-                title: "Unique Task".to_string(),
-                completed: false,
-                parent_id: None,
-                children: vec![],
-            })
-            .await
-            .unwrap();
+        let mut fields2 = HashMap::new();
+        fields2.insert("id".to_string(), Value::String("shared-1".to_string()));
+        fields2.insert("title".to_string(), Value::String("Shared Task (duplicate)".to_string()));
+        fields2.insert("completed".to_string(), Value::Boolean(false));
+        internal_store2.create(fields2).await.unwrap();
+
+        let mut fields3 = HashMap::new();
+        fields3.insert("id".to_string(), Value::String("unique-2".to_string()));
+        fields3.insert("title".to_string(), Value::String("Unique Task".to_string()));
+        fields3.insert("completed".to_string(), Value::Boolean(false));
+        internal_store2.create(fields3).await.unwrap();
 
         let cache1 = Arc::new(
             QueryableCache::with_database(internal_store1, ":memory:")

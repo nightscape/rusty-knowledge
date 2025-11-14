@@ -640,7 +640,7 @@ This phase addresses all critical issues before proceeding to UI implementation.
 
 **Solution**: Create mirror types in the bridge layer with explicit serialization.
 
-- ✅ Created `frontends/rusty_knowledge/rust/src/api/types.rs` (replaced old mirror approach)
+- ✅ Created `frontends/flutter/rust/src/api/types.rs` (replaced old mirror approach)
 - ✅ Defined mirror types:
   - `MirrorBlockChange` (Created/Updated/Deleted/Moved variants) with `#[frb(dart_metadata=("freezed"))]`
   - `MirrorApiError` (6 variants) with `#[frb(dart_metadata=("freezed"))]`
@@ -655,9 +655,9 @@ This phase addresses all critical issues before proceeding to UI implementation.
 - ✅ Ran `flutter pub run build_runner build` - generated freezed sealed classes
 
 **Key Files Modified**:
-- `frontends/rusty_knowledge/rust/src/api/types.rs` (new mirror types)
-- `frontends/rusty_knowledge/rust/src/api/repository.rs` (all methods updated)
-- `frontends/rusty_knowledge/pubspec.yaml` (added freezed dependencies)
+- `frontends/flutter/rust/src/api/types.rs` (new mirror types)
+- `frontends/flutter/rust/src/api/repository.rs` (all methods updated)
+- `frontends/flutter/pubspec.yaml` (added freezed dependencies)
 - Generated: `lib/src/rust/api/types.dart` (with sealed classes)
 - Generated: `lib/src/rust/api/types.freezed.dart` (freezed implementation)
 

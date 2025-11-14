@@ -1,0 +1,196 @@
+{
+  "updatable_columns": [
+    {
+      "name": null,
+      "table": "blocks",
+      "column": "id",
+      "target_id": 129
+    },
+    {
+      "name": null,
+      "table": "blocks",
+      "column": "parent_id",
+      "target_id": 130
+    },
+    {
+      "name": null,
+      "table": "blocks",
+      "column": "depth",
+      "target_id": 131
+    },
+    {
+      "name": null,
+      "table": "blocks",
+      "column": "sort_key",
+      "target_id": 132
+    },
+    {
+      "name": null,
+      "table": "blocks",
+      "column": "content",
+      "target_id": 133
+    },
+    {
+      "name": null,
+      "table": "blocks",
+      "column": "completed",
+      "target_id": 134
+    },
+    {
+      "name": null,
+      "table": "blocks",
+      "column": "block_type",
+      "target_id": 135
+    },
+    {
+      "name": null,
+      "table": "blocks",
+      "column": "collapsed",
+      "target_id": 136
+    },
+    {
+      "name": null,
+      "table": "blocks",
+      "column": "completed",
+      "target_id": 141
+    },
+    {
+      "name": null,
+      "table": "blocks",
+      "column": "id",
+      "target_id": 145
+    },
+    {
+      "name": null,
+      "table": "blocks",
+      "column": "content",
+      "target_id": 153
+    },
+    {
+      "name": null,
+      "table": "blocks",
+      "column": "parent_id",
+      "target_id": 161
+    },
+    {
+      "name": null,
+      "table": "blocks",
+      "column": "block_type",
+      "target_id": 165
+    },
+    {
+      "name": "parent_el",
+      "table": "blocks",
+      "column": "parent_id",
+      "target_id": 182
+    },
+    {
+      "name": "content_el",
+      "table": "blocks",
+      "column": "content",
+      "target_id": 183
+    },
+    {
+      "name": "id_el",
+      "table": "blocks",
+      "column": "id",
+      "target_id": 184
+    },
+    {
+      "name": "badge_el",
+      "table": "blocks",
+      "column": "block_type",
+      "target_id": 185
+    },
+    {
+      "name": "blocks.id",
+      "table": "blocks",
+      "column": "id",
+      "target_id": 186
+    },
+    {
+      "name": "blocks.parent_id",
+      "table": "blocks",
+      "column": "parent_id",
+      "target_id": 187
+    },
+    {
+      "name": "blocks.depth",
+      "table": "blocks",
+      "column": "depth",
+      "target_id": 188
+    },
+    {
+      "name": "blocks.sort_key",
+      "table": "blocks",
+      "column": "sort_key",
+      "target_id": 189
+    },
+    {
+      "name": "blocks.content",
+      "table": "blocks",
+      "column": "content",
+      "target_id": 190
+    },
+    {
+      "name": "blocks.completed",
+      "table": "blocks",
+      "column": "completed",
+      "target_id": 191
+    },
+    {
+      "name": "blocks.block_type",
+      "table": "blocks",
+      "column": "block_type",
+      "target_id": 192
+    },
+    {
+      "name": "blocks.collapsed",
+      "table": "blocks",
+      "column": "collapsed",
+      "target_id": 193
+    },
+    {
+      "name": "checkbox_el",
+      "table": "blocks",
+      "column": "completed",
+      "target_id": 196
+    }
+  ],
+  "computed_columns": [
+    {
+      "name": "parent_label_el",
+      "kind": "Literal",
+      "target_id": 195
+    },
+    {
+      "name": "row_el",
+      "kind": "Array",
+      "target_id": 197
+    },
+    {
+      "name": "space_el",
+      "kind": "Literal",
+      "target_id": 198
+    },
+    {
+      "name": "render_output",
+      "kind": "Tuple",
+      "target_id": 206
+    }
+  ],
+  "source_tables": [
+    {
+      "name": "blocks",
+      "table": [
+        "default_db",
+        "blocks"
+      ]
+    }
+  ],
+  "stats": {
+    "total_columns": 33,
+    "updatable_columns": 26,
+    "computed_columns": 7
+  }
+}

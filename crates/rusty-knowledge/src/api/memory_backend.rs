@@ -4,19 +4,19 @@
 //! and as a reference implementation. It implements only `CoreOperations`
 //! and `Lifecycle` traits (no networking, no change notifications).
 
-use super::repository::{ChangeNotifications, CoreOperations, Lifecycle};
+use crate::api::streaming::ChangeSubscribers;
+
+use super::repository::{CoreOperations, Lifecycle};
+use super::streaming::{ChangeNotifications, Change, ChangeOrigin, StreamPosition};
 use super::types::{
-    ApiError, Block, BlockChange, BlockMetadata, ChangeOrigin, NewBlock, StreamPosition,
+    ApiError, Block, BlockMetadata, NewBlock,
 };
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 use tokio::sync::mpsc;
 use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
-
-/// Type alias for change notification subscribers
-type ChangeSubscribers = Arc<Mutex<Vec<mpsc::Sender<Result<BlockChange, ApiError>>>>>;
 
 /// In-memory block storage using HashMaps.
 ///
@@ -57,7 +57,7 @@ impl Clone for MemoryBackend {
             children_by_parent: state.children_by_parent.clone(),
             next_id_counter: state.next_id_counter,
             version_counter: state.version_counter,
-            subscribers: Arc::new(Mutex::new(Vec::new())),
+            subscribers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             event_log: state.event_log.clone(),
         };
 
@@ -79,10 +79,10 @@ struct MemoryState {
     /// Version counter (increments with each mutation)
     version_counter: u64,
     /// Active change notification subscribers
-    subscribers: ChangeSubscribers,
+    subscribers: ChangeSubscribers<Block>,
     /// Event log for replaying past events to new watchers
     /// Maps version -> events that created that version
-    event_log: Vec<BlockChange>,
+    event_log: Vec<Change<Block>>,
 }
 
 impl Default for MemoryState {
@@ -92,7 +92,7 @@ impl Default for MemoryState {
             children_by_parent: HashMap::new(),
             next_id_counter: 0,
             version_counter: 0,
-            subscribers: Arc::new(Mutex::new(Vec::new())),
+            subscribers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             event_log: Vec::new(),
         }
     }
@@ -133,11 +133,17 @@ impl MemoryBackend {
 
     /// Notify all active subscribers of a change event and add to event log.
     /// Removes closed channels automatically.
-    fn notify_subscribers(state: &mut MemoryState, change: BlockChange) {
+    /// Sends the change as a single-item batch.
+    /// Note: This spawns a task to avoid blocking on async lock.
+    fn notify_subscribers(state: &mut MemoryState, change: Change<Block>) {
         state.event_log.push(change.clone());
 
-        let mut subscribers = state.subscribers.lock().unwrap();
-        subscribers.retain(|sender| sender.try_send(Ok(change.clone())).is_ok());
+        let batch = vec![change];
+        let subscribers = state.subscribers.clone();
+        tokio::spawn(async move {
+            let mut subscribers = subscribers.lock().await;
+            subscribers.retain(|sender| sender.try_send(Ok(batch.clone())).is_ok());
+        });
     }
 
     /// Count of non-deleted blocks.
@@ -180,6 +186,26 @@ impl Lifecycle for MemoryBackend {
         state
             .blocks
             .insert(super::types::ROOT_PARENT_ID.to_string(), root_block);
+
+        // Create a default first child block so the UI has something to display
+        let first_block_id = Self::generate_block_id(&mut state);
+        let first_block = MemoryBlock {
+            id: first_block_id.clone(),
+            parent_id: super::types::ROOT_PARENT_ID.to_string(),
+            content: String::new(),
+            created_at: now,
+            updated_at: now,
+            deleted_at: None,
+        };
+        state.blocks.insert(first_block_id.clone(), first_block);
+
+        // Add the first block as a child of root
+        state
+            .children_by_parent
+            .entry(super::types::ROOT_PARENT_ID.to_string())
+            .or_insert_with(Vec::new)
+            .push(first_block_id);
+
         drop(state);
 
         Ok(backend)
@@ -366,8 +392,8 @@ impl CoreOperations for MemoryBackend {
 
         Self::notify_subscribers(
             &mut state,
-            BlockChange::Created {
-                block: result_block.clone(),
+            Change::Created {
+                data: result_block.clone(),
                 origin: ChangeOrigin::Local,
             },
         );
@@ -383,16 +409,37 @@ impl CoreOperations for MemoryBackend {
             .get_mut(id)
             .ok_or_else(|| ApiError::BlockNotFound { id: id.to_string() })?;
 
+        // Clone values before modifying state
+        let parent_id = block.parent_id.clone();
+        let created_at = block.created_at;
+        let updated_at = Self::now_millis();
+
         block.content = content.clone();
-        block.updated_at = Self::now_millis();
+        block.updated_at = updated_at;
+
+        // Get children from children_by_parent
+        let children = state
+            .children_by_parent
+            .get(id)
+            .cloned()
+            .unwrap_or_default();
 
         Self::increment_version(&mut state);
 
         Self::notify_subscribers(
             &mut state,
-            BlockChange::Updated {
+            Change::Updated {
                 id: id.to_string(),
-                content,
+                data: Block {
+                    id: id.to_string(),
+                    parent_id,
+                    content: content.clone(),
+                    children,
+                    metadata: BlockMetadata {
+                        created_at,
+                        updated_at,
+                    },
+                },
                 origin: ChangeOrigin::Local,
             },
         );
@@ -433,7 +480,7 @@ impl CoreOperations for MemoryBackend {
         // Notify subscribers
         Self::notify_subscribers(
             &mut state,
-            BlockChange::Deleted {
+            Change::Deleted {
                 id: id.to_string(),
                 origin: ChangeOrigin::Local,
             },
@@ -538,18 +585,36 @@ impl CoreOperations for MemoryBackend {
 
         // Update block's parent_id
         let block = state.blocks.get_mut(id).unwrap();
+        let content = block.content.clone();
+        let created_at = block.created_at;
+        let updated_at = Self::now_millis();
         block.parent_id = new_parent.clone();
-        block.updated_at = Self::now_millis();
+        block.updated_at = updated_at;
+
+        // Get children from children_by_parent
+        let children = state
+            .children_by_parent
+            .get(id)
+            .cloned()
+            .unwrap_or_default();
 
         Self::increment_version(&mut state);
 
         // Notify subscribers
         Self::notify_subscribers(
             &mut state,
-            BlockChange::Moved {
+            Change::Updated {
                 id: id.to_string(),
-                new_parent: new_parent.clone(),
-                after: after.clone(),
+                data: Block {
+                    id: id.to_string(),
+                    parent_id: new_parent.clone(),
+                    content,
+                    children,
+                    metadata: BlockMetadata {
+                        created_at,
+                        updated_at,
+                    },
+                },
                 origin: ChangeOrigin::Local,
             },
         );
@@ -649,8 +714,8 @@ impl CoreOperations for MemoryBackend {
             // Notify subscribers
             Self::notify_subscribers(
                 &mut state,
-                BlockChange::Created {
-                    block: result_block.clone(),
+                Change::Created {
+                    data: result_block.clone(),
                     origin: ChangeOrigin::Local,
                 },
             );
@@ -694,7 +759,7 @@ impl CoreOperations for MemoryBackend {
             // Notify subscribers
             Self::notify_subscribers(
                 &mut state,
-                BlockChange::Deleted {
+                Change::Deleted {
                     id: id.clone(),
                     origin: ChangeOrigin::Local,
                 },
@@ -709,11 +774,11 @@ impl CoreOperations for MemoryBackend {
 
 // ChangeNotifications trait implementation
 #[async_trait]
-impl ChangeNotifications for MemoryBackend {
+impl ChangeNotifications<Block> for MemoryBackend {
     async fn watch_changes_since(
         &self,
         position: StreamPosition,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<BlockChange, ApiError>> + Send>>, ApiError> {
+    ) -> Pin<Box<dyn Stream<Item = Result<Vec<Change<Block>>, ApiError>> + Send>> {
         // Collect replay events/blocks synchronously
         let replay_items = match position {
             StreamPosition::Beginning => {
@@ -730,8 +795,8 @@ impl ChangeNotifications for MemoryBackend {
                                 .cloned()
                                 .unwrap_or_default();
 
-                            Some(BlockChange::Created {
-                                block: Block {
+                            Some(Change::Created {
+                                data: Block {
                                     id: mem_block.id.clone(),
                                     parent_id: mem_block.parent_id.clone(),
                                     content: mem_block.content.clone(),
@@ -765,25 +830,31 @@ impl ChangeNotifications for MemoryBackend {
         };
 
         // Create channel for live updates
-        let (tx, rx) = mpsc::channel::<Result<BlockChange, ApiError>>(100);
+        let (tx, rx) = mpsc::channel::<std::result::Result<Vec<Change<Block>>, ApiError>>(100);
 
         // Subscribe to future changes
-        {
+        let subscribers = {
             let state = self.state.read().unwrap();
-            let mut subscribers = state.subscribers.lock().unwrap();
-            subscribers.push(tx);
-        }
+            state.subscribers.clone()
+        }; // Drop read lock before async operation
+        let mut subscribers = subscribers.lock().await;
+        subscribers.push(tx);
 
-        // Create a stream that first yields replay items, then live updates
+        // Create a stream that first yields replay items as a batch, then live updates
         // This avoids spawning tasks which can cause runtime deadlocks
-        let replay_stream = tokio_stream::iter(replay_items.into_iter().map(Ok));
+        let replay_batch = if replay_items.is_empty() {
+            vec![]
+        } else {
+            vec![replay_items]
+        };
+        let replay_stream = tokio_stream::iter(replay_batch.into_iter().map(Ok));
         let live_stream = ReceiverStream::new(rx);
         let combined = replay_stream.chain(live_stream);
 
-        Ok(Box::pin(combined))
+        Box::pin(combined)
     }
 
-    async fn get_current_version(&self) -> Result<Vec<u8>, ApiError> {
+    async fn get_current_version(&self) -> std::result::Result<Vec<u8>, ApiError> {
         let state = self.state.read().unwrap();
         Ok(state.version_counter.to_le_bytes().to_vec())
     }

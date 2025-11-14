@@ -95,7 +95,7 @@ Retention: 30 days
 - Pull requests to main/master (only if changes in relevant paths)
 
 # Paths that trigger the workflow:
-- frontends/rusty_knowledge/**
+- frontends/flutter/**
 - crates/rusty-knowledge/**
 - .github/workflows/ci.yml
 
@@ -146,7 +146,7 @@ To sign Android builds for release distribution:
    ```yaml
    - name: Setup Android signing
      if: contains(matrix.platform, 'android')
-     working-directory: frontends/rusty_knowledge
+     working-directory: frontends/flutter
      run: |
        echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 --decode > android/app/key.jks
        cat > android/key.properties << EOF

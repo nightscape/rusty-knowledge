@@ -70,8 +70,22 @@ where
 mod tests {
     use super::*;
     use crate::core::{AlwaysTrue, Blocklike, DataSource, Eq, Queryable, QueryableCache};
+    use crate::core::datasource::CrudOperationProvider;
     use crate::storage::task_datasource::InMemoryTaskStore;
     use crate::tasks::Task;
+    use crate::storage::types::Value;
+    use std::collections::HashMap;
+
+    fn task_to_fields(task: &Task) -> HashMap<String, Value> {
+        let mut fields = HashMap::new();
+        fields.insert("id".to_string(), Value::String(task.id.clone()));
+        fields.insert("title".to_string(), Value::String(task.title.clone()));
+        fields.insert("completed".to_string(), Value::Boolean(task.completed));
+        if let Some(ref parent_id) = task.parent_id {
+            fields.insert("parent_id".to_string(), Value::String(parent_id.clone()));
+        }
+        fields
+    }
 
     #[tokio::test]
     async fn test_block_adapter_query() {
@@ -79,8 +93,8 @@ mod tests {
         let task1 = Task::new("Test Task 1".to_string(), None);
         let task2 = Task::new("Test Task 2".to_string(), None);
 
-        store.insert(task1.clone()).await.unwrap();
-        store.insert(task2.clone()).await.unwrap();
+        store.create(task_to_fields(&task1)).await.unwrap();
+        store.create(task_to_fields(&task2)).await.unwrap();
 
         let cache = QueryableCache::with_database(store, ":memory:")
             .await
@@ -103,8 +117,8 @@ mod tests {
         let mut task2 = Task::new("Complete Task".to_string(), None);
         task2.completed = true;
 
-        store.insert(task1.clone()).await.unwrap();
-        store.insert(task2.clone()).await.unwrap();
+        store.create(task_to_fields(&task1)).await.unwrap();
+        store.create(task_to_fields(&task2)).await.unwrap();
 
         let cache = QueryableCache::with_database(store, ":memory:")
             .await

@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::references::{BlockReference, ViewConfig};
-use crate::storage::{Entity, Result, StorageError};
+use crate::storage::{StorageEntity, Result, StorageError};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -15,8 +15,8 @@ pub enum ResolvedBlock {
     External {
         system: String,
         entity_type: String,
-        entity: Entity,
-        related: Vec<Entity>,
+        entity: StorageEntity,
+        related: Vec<StorageEntity>,
     },
 }
 

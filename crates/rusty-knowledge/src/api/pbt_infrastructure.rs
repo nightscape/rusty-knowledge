@@ -268,6 +268,46 @@ pub fn verify_backends_match<R1, R2>(
     }
 }
 
+/// Populate ID map with initial blocks from both backends
+///
+/// When backends are initialized via `Lifecycle::create_new()`, they create:
+/// 1. A root block with ID `ROOT_PARENT_ID`
+/// 2. A first child block (e.g., "local://0" in MemoryBackend)
+///
+/// This function maps these initial blocks between reference and SUT backends.
+pub async fn populate_initial_id_map<R1: CoreOperations, R2: CoreOperations>(
+    id_map: &mut HashMap<String, String>,
+    ref_backend: &R1,
+    sut_backend: &R2,
+) -> Result<(), ApiError> {
+    use super::types::{ROOT_PARENT_ID, Traversal};
+
+    // Map root block ID (same in both backends)
+    let root_id = ROOT_PARENT_ID.to_string();
+    id_map.insert(root_id.clone(), root_id);
+
+    // Get all initial blocks from both backends
+    let ref_blocks = ref_backend.get_all_blocks(Traversal::ALL).await?;
+    let sut_blocks = sut_backend.get_all_blocks(Traversal::ALL).await?;
+
+    // Map initial child blocks by matching parent_id and content
+    // We match blocks that have the root as parent and same content
+    for ref_block in &ref_blocks {
+        if ref_block.parent_id == ROOT_PARENT_ID && !id_map.contains_key(&ref_block.id) {
+            // Find matching block in SUT by parent_id and content
+            if let Some(sut_block) = sut_blocks.iter().find(|b| {
+                b.parent_id == ROOT_PARENT_ID
+                    && b.content == ref_block.content
+                    && !id_map.values().any(|v| v == &b.id)
+            }) {
+                id_map.insert(ref_block.id.clone(), sut_block.id.clone());
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Update ID map after create operations
 ///
 /// Matches newly created blocks in reference backend with SUT backend
@@ -297,21 +337,36 @@ pub fn update_id_map_after_create(
             // Map reference ID → SUT ID
             id_map.insert(ref_block.id.clone(), created_blocks[0].id.clone());
         }
-        BlockTransition::CreateBlocks { .. } => {
-            // Find all newly created blocks (not yet in id_map)
-            let new_ref_blocks: Vec<_> = ref_blocks
-                .iter()
-                .filter(|b| !id_map.contains_key(&b.id))
-                .collect();
+        BlockTransition::CreateBlocks { blocks } => {
+            // Match blocks by (parent_id, content) instead of position
+            // because get_all_blocks returns blocks in tree traversal order,
+            // not creation order
+            for (parent_id, content) in blocks {
+                // Translate parent_id from reference ID to SUT ID
+                let sut_parent_id = translate_id(parent_id, id_map)
+                    .unwrap_or_else(|| panic!("CreateBlocks parent: ID '{}' must exist in id_map", parent_id));
 
-            assert_eq!(
-                new_ref_blocks.len(),
-                created_blocks.len(),
-                "Should have same number of new blocks in both backends"
-            );
+                // Find the matching block in reference backend
+                let ref_block = ref_blocks
+                    .iter()
+                    .find(|b| {
+                        !id_map.contains_key(&b.id)
+                            && b.content == *content
+                            && b.parent_id == *parent_id
+                    })
+                    .expect("Should find newly created block in reference");
 
-            // Map by position (assume same creation order)
-            for (ref_block, sut_block) in new_ref_blocks.iter().zip(created_blocks.iter()) {
+                // Find the matching block in SUT backend
+                let sut_block = created_blocks
+                    .iter()
+                    .find(|b| {
+                        b.content == *content
+                            && b.parent_id == sut_parent_id
+                            && !id_map.values().any(|v| v == &b.id)
+                    })
+                    .expect("Should find newly created block in SUT");
+
+                // Map reference ID → SUT ID
                 id_map.insert(ref_block.id.clone(), sut_block.id.clone());
             }
         }

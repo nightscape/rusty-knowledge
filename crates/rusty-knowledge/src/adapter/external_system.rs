@@ -1,3 +1,13 @@
+// NOTE: This module is temporarily disabled because it relied on manual _dirty tracking
+// which has been replaced by Turso's native CDC (Change Data Capture) functionality.
+//
+// To re-enable this module, the sync_to_remote method needs to be refactored to:
+// 1. Use CDC to detect changes instead of get_dirty()
+// 2. Remove mark_clean() calls and rely on CDC state management
+//
+// See turso.rs for examples of using CDC with row_changes()
+
+/*
 use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -96,6 +106,7 @@ where
         Ok(stats)
     }
 
+    // TODO: Refactor this to use CDC instead of manual dirty tracking
     pub async fn sync_to_remote(&mut self) -> Result<SyncStats> {
         let mut stats = SyncStats::default();
         let mut storage = self.storage.lock().await;
@@ -134,3 +145,4 @@ where
         Ok((from_stats, to_stats))
     }
 }
+*/

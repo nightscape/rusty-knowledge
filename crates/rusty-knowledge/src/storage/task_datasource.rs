@@ -1,23 +1,49 @@
-use crate::core::traits::{DataSource, Result};
+use crate::api::streaming::{ChangeNotifications, Change, ChangeOrigin, StreamPosition};
+use crate::api::types::ApiError;
+use crate::core::datasource::{DataSource, CrudOperationProvider, Result};
+use crate::storage::types::Value;
 use crate::tasks::Task;
 use async_trait::async_trait;
+use std::pin::Pin;
 use std::sync::{Arc, RwLock};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::collections::HashMap;
+use tokio::sync::mpsc;
+use tokio_stream::{wrappers::ReceiverStream, Stream, StreamExt};
 
 #[derive(Clone)]
 pub struct InMemoryTaskStore {
     tasks: Arc<RwLock<Vec<Task>>>,
+    /// Version counter for change tracking
+    version: Arc<AtomicU64>,
+    /// Channel senders for change notifications
+    change_senders: Arc<RwLock<Vec<mpsc::Sender<std::result::Result<Vec<Change<Task>>, ApiError>>>>>,
 }
 
 impl InMemoryTaskStore {
     pub fn new() -> Self {
         Self {
             tasks: Arc::new(RwLock::new(Vec::new())),
+            version: Arc::new(AtomicU64::new(0)),
+            change_senders: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
     pub fn with_tasks(tasks: Vec<Task>) -> Self {
         Self {
             tasks: Arc::new(RwLock::new(tasks)),
+            version: Arc::new(AtomicU64::new(0)),
+            change_senders: Arc::new(RwLock::new(Vec::new())),
+        }
+    }
+
+    /// Emit a change to all subscribers
+    fn emit_change(&self, change: Change<Task>) {
+        self.version.fetch_add(1, Ordering::SeqCst);
+        let senders = self.change_senders.read().unwrap();
+        let change_batch = vec![change];
+        for sender in senders.iter() {
+            let _ = sender.try_send(Ok(change_batch.clone()));
         }
     }
 
@@ -78,6 +104,71 @@ impl Default for InMemoryTaskStore {
 }
 
 #[async_trait]
+impl ChangeNotifications<Task> for InMemoryTaskStore {
+    async fn watch_changes_since(
+        &self,
+        position: StreamPosition,
+    ) -> Pin<Box<dyn Stream<Item = std::result::Result<Vec<Change<Task>>, ApiError>> + Send>> {
+        let (tx, rx) = mpsc::channel(100);
+
+        // Register sender
+        {
+            let mut senders = self.change_senders.write().unwrap();
+            senders.push(tx);
+        }
+
+        match position {
+            StreamPosition::Beginning => {
+                // First, collect all current tasks as Created events
+                let current_tasks = {
+                    let tasks = self.tasks.read().unwrap();
+                    let flat = Self::flatten_tasks(&tasks);
+                    flat.into_iter()
+                        .map(|task| Change::Created {
+                            data: task,
+                            origin: ChangeOrigin::Remote,
+                        })
+                        .collect::<Vec<_>>()
+                };
+
+                // Create stream that first yields current tasks, then forwards future changes
+                let initial_batch = if current_tasks.is_empty() {
+                    vec![]
+                } else {
+                    vec![current_tasks]
+                };
+                let initial_stream = tokio_stream::iter(initial_batch.into_iter().map(Ok));
+                let change_stream = ReceiverStream::new(rx)
+                    .map(|result| {
+                        result.map_err(|e| ApiError::InternalError {
+                            message: format!("Channel receive error: {}", e),
+                        })
+                    });
+
+                Box::pin(initial_stream.chain(change_stream))
+            }
+            StreamPosition::Version(_version_bytes) => {
+                // For version-based sync, just forward future changes
+                // In a more sophisticated implementation, we'd track a change log
+                let change_stream = ReceiverStream::new(rx)
+                    .map(|result| {
+                        result.map_err(|e| ApiError::InternalError {
+                            message: format!("Channel receive error: {}", e),
+                        })
+                    });
+                Box::pin(change_stream)
+            }
+        }
+    }
+
+    async fn get_current_version(&self) -> std::result::Result<Vec<u8>, ApiError> {
+        let version = self.version.load(Ordering::SeqCst);
+        Ok(version.to_le_bytes().to_vec())
+    }
+}
+
+// Keep DataSource implementation for backward compatibility during migration
+#[async_trait]
 impl DataSource<Task> for InMemoryTaskStore {
     async fn get_all(&self) -> Result<Vec<Task>> {
         let tasks = self
@@ -96,40 +187,98 @@ impl DataSource<Task> for InMemoryTaskStore {
         let flat = Self::flatten_tasks(&tasks);
         Ok(flat.into_iter().find(|t| t.id == id))
     }
+}
 
-    async fn insert(&self, mut item: Task) -> Result<String> {
-        item.children = Vec::new();
-        let id = item.id.clone();
-
+#[async_trait]
+impl CrudOperationProvider<Task> for InMemoryTaskStore {
+    async fn set_field(&self, id: &str, field: &str, value: Value) -> Result<()> {
         let mut tasks = self
             .tasks
             .write()
             .map_err(|e| format!("Failed to write tasks: {}", e))?;
 
-        let mut flat = Self::flatten_tasks(&tasks);
-        flat.push(item);
-        *tasks = Self::rebuild_hierarchy(flat);
+        let flat = Self::flatten_tasks(&tasks);
+        let mut updated_flat = flat;
 
-        Ok(id)
-    }
+        if let Some(pos) = updated_flat.iter().position(|t| t.id == id) {
+            match field {
+                "title" => {
+                    if let Value::String(s) = value {
+                        updated_flat[pos].title = s;
+                    }
+                }
+                "completed" => {
+                    if let Value::Boolean(b) = value {
+                        updated_flat[pos].completed = b;
+                    }
+                }
+                "parent_id" => {
+                    match value {
+                        Value::String(s) => updated_flat[pos].parent_id = Some(s),
+                        Value::Null => updated_flat[pos].parent_id = None,
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+            // Clone the task before moving updated_flat
+            let task_to_emit = updated_flat[pos].clone();
+            *tasks = Self::rebuild_hierarchy(updated_flat);
 
-    async fn update(&self, id: &str, mut item: Task) -> Result<()> {
-        item.children = Vec::new();
+            // Emit change
+            self.emit_change(Change::Updated {
+                id: id.to_string(),
+                data: task_to_emit,
+                origin: ChangeOrigin::Local,
+            });
 
-        let mut tasks = self
-            .tasks
-            .write()
-            .map_err(|e| format!("Failed to write tasks: {}", e))?;
-
-        let mut flat = Self::flatten_tasks(&tasks);
-
-        if let Some(pos) = flat.iter().position(|t| t.id == id) {
-            flat[pos] = item;
-            *tasks = Self::rebuild_hierarchy(flat);
             Ok(())
         } else {
             Err(format!("Task not found: {}", id).into())
         }
+    }
+
+    async fn create(&self, fields: HashMap<String, Value>) -> Result<String> {
+        let id = fields.get("id")
+            .and_then(|v| v.as_string().map(|s| s.to_string()))
+            .unwrap_or_else(|| format!("task-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let title = fields.get("title")
+            .and_then(|v| v.as_string().map(|s| s.to_string()))
+            .unwrap_or_else(|| "Untitled".to_string());
+        let completed = fields.get("completed")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let parent_id = fields.get("parent_id")
+            .and_then(|v| match v {
+                Value::String(s) => Some(s.clone()),
+                Value::Null => None,
+                _ => None,
+            });
+
+        let task = Task {
+            id: id.clone(),
+            title,
+            completed,
+            parent_id,
+            children: Vec::new(),
+        };
+
+        let mut tasks = self
+            .tasks
+            .write()
+            .map_err(|e| format!("Failed to write tasks: {}", e))?;
+
+        let mut flat = Self::flatten_tasks(&tasks);
+        flat.push(task.clone());
+        *tasks = Self::rebuild_hierarchy(flat);
+
+        // Emit change
+        self.emit_change(Change::Created {
+            data: task,
+            origin: ChangeOrigin::Local,
+        });
+
+        Ok(id)
     }
 
     async fn delete(&self, id: &str) -> Result<()> {
@@ -143,6 +292,13 @@ impl DataSource<Task> for InMemoryTaskStore {
         if let Some(pos) = flat.iter().position(|t| t.id == id) {
             flat.remove(pos);
             *tasks = Self::rebuild_hierarchy(flat);
+
+            // Emit change
+            self.emit_change(Change::Deleted {
+                id: id.to_string(),
+                origin: ChangeOrigin::Local,
+            });
+
             Ok(())
         } else {
             Err(format!("Task not found: {}", id).into())
@@ -160,7 +316,12 @@ mod tests {
         let task = Task::new("Test Task".to_string(), None);
         let id = task.id.clone();
 
-        store.insert(task).await.unwrap();
+        let mut fields = HashMap::new();
+        fields.insert("id".to_string(), Value::String(id.clone()));
+        fields.insert("title".to_string(), Value::String(task.title.clone()));
+        fields.insert("completed".to_string(), Value::Boolean(task.completed));
+        store.create(fields).await.unwrap();
+
         let all_tasks = store.get_all().await.unwrap();
 
         assert_eq!(all_tasks.len(), 1);
@@ -174,7 +335,12 @@ mod tests {
         let task = Task::new("Find Me".to_string(), None);
         let id = task.id.clone();
 
-        store.insert(task).await.unwrap();
+        let mut fields = HashMap::new();
+        fields.insert("id".to_string(), Value::String(id.clone()));
+        fields.insert("title".to_string(), Value::String(task.title.clone()));
+        fields.insert("completed".to_string(), Value::Boolean(task.completed));
+        store.create(fields).await.unwrap();
+
         let found = store.get_by_id(&id).await.unwrap();
 
         assert!(found.is_some());
@@ -187,13 +353,14 @@ mod tests {
         let task = Task::new("Original".to_string(), None);
         let id = task.id.clone();
 
-        store.insert(task).await.unwrap();
+        let mut fields = HashMap::new();
+        fields.insert("id".to_string(), Value::String(id.clone()));
+        fields.insert("title".to_string(), Value::String(task.title.clone()));
+        fields.insert("completed".to_string(), Value::Boolean(task.completed));
+        store.create(fields).await.unwrap();
 
-        let mut updated = Task::new("Updated".to_string(), None);
-        updated.id = id.clone();
-        updated.completed = true;
-
-        store.update(&id, updated).await.unwrap();
+        store.set_field(&id, "title", Value::String("Updated".to_string())).await.unwrap();
+        store.set_field(&id, "completed", Value::Boolean(true)).await.unwrap();
 
         let found = store.get_by_id(&id).await.unwrap().unwrap();
         assert_eq!(found.title, "Updated");
@@ -206,7 +373,12 @@ mod tests {
         let task = Task::new("Delete Me".to_string(), None);
         let id = task.id.clone();
 
-        store.insert(task).await.unwrap();
+        let mut fields = HashMap::new();
+        fields.insert("id".to_string(), Value::String(id.clone()));
+        fields.insert("title".to_string(), Value::String(task.title.clone()));
+        fields.insert("completed".to_string(), Value::Boolean(task.completed));
+        store.create(fields).await.unwrap();
+
         assert_eq!(store.get_all().await.unwrap().len(), 1);
 
         store.delete(&id).await.unwrap();
@@ -219,10 +391,20 @@ mod tests {
 
         let parent = Task::new("Parent".to_string(), None);
         let parent_id = parent.id.clone();
-        store.insert(parent).await.unwrap();
+
+        let mut parent_fields = HashMap::new();
+        parent_fields.insert("id".to_string(), Value::String(parent_id.clone()));
+        parent_fields.insert("title".to_string(), Value::String(parent.title.clone()));
+        parent_fields.insert("completed".to_string(), Value::Boolean(parent.completed));
+        store.create(parent_fields).await.unwrap();
 
         let child = Task::new("Child".to_string(), Some(parent_id.clone()));
-        store.insert(child).await.unwrap();
+        let mut child_fields = HashMap::new();
+        child_fields.insert("id".to_string(), Value::String(child.id.clone()));
+        child_fields.insert("title".to_string(), Value::String(child.title.clone()));
+        child_fields.insert("completed".to_string(), Value::Boolean(child.completed));
+        child_fields.insert("parent_id".to_string(), Value::String(parent_id.clone()));
+        store.create(child_fields).await.unwrap();
 
         let all = store.get_all().await.unwrap();
         assert_eq!(all.len(), 2);

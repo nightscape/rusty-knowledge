@@ -1,0 +1,6 @@
+let ui_render = rul:null -> s"render({rul})"
+
+from blocks
+select {
+  ui = ui_render rul:id
+}

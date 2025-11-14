@@ -1,0 +1,54 @@
+[package]
+name = "tui-frontend"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "tui_r3bl_frontend"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tui-demo"
+path = "src/main.rs"
+
+[dependencies]
+# R3BL TUI Framework
+r3bl_tui = { path = "/Users/martin/Workspaces/rust/r3bl-open-core/tui" }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "2.0"
+miette = "7.4"
+async-trait = "0.1"
+chrono = "0.4"
+
+# Data handling
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+unicode-segmentation = "1.11"
+
+# Local dependencies
+libsql = { version = "0.9", features = ["core", "remote"] }
+rusty-knowledge = { path = "../../crates/rusty-knowledge" }
+rusty-knowledge-todoist = { path = "../../crates/rusty-knowledge-todoist" }
+query-render = { path = "../../crates/query-render" }
+uuid = { version = "1", features = ["v4"] }
+
+# Logging
+tracing = "0.1"
+tracing-core = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+[dev-dependencies]
+# PTY testing infrastructure
+portable-pty = "0.8"
+is_ci = "1.2"
+strip-ansi-escapes = "0.2"
+# Property-based testing
+proptest = "1.6"
+proptest-state-machine = "0.5.0"

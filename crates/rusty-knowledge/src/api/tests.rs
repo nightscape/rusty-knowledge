@@ -4,6 +4,7 @@
 //! and implement the required traits.
 
 use super::types::*;
+use super::streaming::{Change, ChangeOrigin};
 
 #[test]
 fn test_block_serialization() {
@@ -82,39 +83,36 @@ fn test_new_block_serialization() {
 #[test]
 fn test_block_change_serialization() {
     let changes = vec![
-        BlockChange::Created {
-            block: Block {
+        Change::Created {
+            data: Block {
                 id: "new-block".to_string(),
                 parent_id: "test-parent".to_string(),
                 content: "Content".to_string(),
                 children: vec![],
-                metadata: BlockMetadata {
-                    created_at: 1000,
-                    updated_at: 1000,
-                },
+                metadata: BlockMetadata::default(),
             },
             origin: ChangeOrigin::Local,
         },
-        BlockChange::Updated {
+        Change::Updated {
             id: "block-1".to_string(),
-            content: "Updated content".to_string(),
+            data: Block {
+                id: "block-1".to_string(),
+                parent_id: "test-parent".to_string(),
+                content: "Updated content".to_string(),
+                children: vec![],
+                metadata: BlockMetadata::default(),
+            },
             origin: ChangeOrigin::Remote,
         },
-        BlockChange::Deleted {
+        Change::Deleted {
             id: "block-2".to_string(),
             origin: ChangeOrigin::Local,
-        },
-        BlockChange::Moved {
-            id: "block-3".to_string(),
-            new_parent: "parent-4".to_string(),
-            after: Some("sibling-5".to_string()),
-            origin: ChangeOrigin::Remote,
         },
     ];
 
     for change in changes {
         let json = serde_json::to_string(&change).expect("Failed to serialize change");
-        let _deserialized: BlockChange =
+        let _deserialized: Change<Block> =
             serde_json::from_str(&json).expect("Failed to deserialize change");
         // Successfully round-tripped
     }

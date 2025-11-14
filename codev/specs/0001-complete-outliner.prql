@@ -1,0 +1,463 @@
+# ============================================================================
+# COMPLETE OUTLINER IMPLEMENTATION
+# ============================================================================
+# Status: Complete Example with Corrected PRQL Syntax
+# Date: 2025-01-03
+# Schema: 0001-reactive-prql-schema.sql
+# Primitives: 0001-reactive-prql-rendering-primitives.md
+
+# ============================================================================
+# SHARED DEFINITIONS
+# ============================================================================
+
+# Helper function: Standard block operations
+let standard_block_ops = func params -> (
+  (block_operations
+    operations: [
+      {name: "indent", default_key: "Tab", icon: "→", description: "Indent block"},
+      {name: "outdent", default_key: "Shift+Tab", icon: "←", description: "Outdent block"},
+      {name: "split", default_key: "Enter", icon: "✂", description: "Split at cursor"},
+      {name: "delete", default_key: "Ctrl+Shift+K", icon: "🗑", description: "Delete block"},
+      {name: "add_child", default_key: "Ctrl+Shift+Down", icon: "↓", description: "Add child"},
+      {name: "merge_up", default_key: "Backspace@start", icon: "⬆", description: "Merge with previous"},
+      {name: "toggle_collapse", default_key: "Ctrl+Space", icon: "▶", description: "Collapse/expand"}
+    ],
+    params: params
+  )
+)
+
+# Helper function: Drag-drop zones
+let drop_zones = func invalid_targets, on_drop -> [
+  (drop_zone position: "before", on_drop: on_drop, invalid_targets: invalid_targets),
+  (drop_zone position: "after", on_drop: on_drop, invalid_targets: invalid_targets),
+  (drop_zone position: "as_child", on_drop: on_drop, invalid_targets: invalid_targets, visible: !is_collapsed)
+]
+
+# ============================================================================
+# RECURSIVE HELPER FUNCTIONS
+# ============================================================================
+
+# Compute ancestor path for constraint checking
+let recursive_ancestors = func block_id -> (
+  # Compiles to SQL recursive CTE
+  with recursive ancestors as (
+    select id, parent_id, id as ancestor_id, 0 as depth
+    from blocks
+    where id = $block_id
+    union all
+    select b.id, b.parent_id, a.parent_id as ancestor_id, a.depth + 1
+    from blocks b
+    join ancestors a on b.id = a.parent_id
+    where a.parent_id is not null
+  )
+  select group_concat(ancestor_id, ',') as ancestor_path
+  from ancestors
+  order by depth desc
+)
+
+# Count ancestors to compute depth
+let count_ancestors = func parent_id -> (
+  with recursive ancestors as (
+    select id, parent_id, 0 as depth
+    from blocks
+    where id = $parent_id
+    union all
+    select b.id, b.parent_id, a.depth + 1
+    from blocks b
+    join ancestors a on b.id = a.parent_id
+    where a.parent_id is not null
+  )
+  select max(depth) from ancestors
+)
+
+# Check if block is descendant of another (for zoom filtering)
+let ancestor_of = func block_id, root_id -> (
+  # Returns true if block_id is root_id or descendent of root_id
+  with recursive tree as (
+    select id from blocks where id = $root_id
+    union all
+    select b.id from blocks b
+    join tree t on b.parent_id = t.id
+  )
+  select exists(select 1 from tree where id = $block_id)
+)
+
+# Check if any ancestor is collapsed
+let any_ancestor_collapsed = func block_id -> (
+  with recursive ancestors as (
+    select id, parent_id from blocks where id = $block_id
+    union all
+    select b.id, b.parent_id
+    from blocks b
+    join ancestors a on b.id = a.parent_id
+  )
+  select exists(
+    select 1 from ancestors a
+    join collapsed_blocks cb on a.id = cb.block_id
+    where cb.user_id = $session_user_id and cb.is_collapsed = 1
+  )
+)
+
+# ============================================================================
+# MAIN QUERY
+# ============================================================================
+
+from blocks
+
+# Join application state (provides current_root_block_id for navigation)
+join app_state (eq user_id $session_user_id)
+
+# Join cursor positions from Turso (persistent)
+join cursor_positions (eq block_id blocks.id and user_id $session_user_id)
+
+# Join collapsed state
+join collapsed_blocks (eq block_id blocks.id and user_id $session_user_id)
+
+# Filter by current root (for zoom/navigation)
+# When app_state.current_root_block_id changes, CDC triggers re-query → UI updates
+filter (
+  (ancestor_of id app_state.current_root_block_id) or
+  (eq id app_state.current_root_block_id)
+)
+
+# Compute tree structure fields
+derive [
+  # Precomputed ancestor path for constraint checking (O(1) validation)
+  ancestor_path = (recursive_ancestors id),
+
+  # Tree metadata
+  depth = (count_ancestors parent_id),
+  has_children = (exists (from blocks filter (eq parent_id blocks.id))),
+  is_visible = (not (any_ancestor_collapsed id))
+]
+
+# Filter out collapsed subtrees
+filter (is_visible or (eq depth 0))
+
+# Sort by fractional index key (lexicographic order)
+sort sort_key
+
+# ============================================================================
+# RENDER SPECIFICATION
+# ============================================================================
+
+render (list
+  item_template: (block
+    # Dynamic indentation based on depth
+    indent: (mul depth 24),
+
+    # Bullet point or collapse indicator
+    bullet: (case [
+      has_children => (collapse_button
+        collapsed: (or is_collapsed false),
+        on_toggle: (toggle_collapse id: id)
+      ),
+      true => (empty)
+    ]),
+
+    # Main content area
+    content: (row
+      # Checkbox for completion status
+      (checkbox
+        checked: (eq completed 1),
+        on_toggle: (update
+          id: id,
+          fields: {completed: (case [(eq completed 1) => 0, true => 1])}
+        )
+      ),
+
+      # Editable text with multi-cursor support
+      (editable_text
+        content: content,
+        on_edit: (update id: id, fields: {content: $new_value}),
+        on_key: (block_keys id: id, parent_id: parent_id, depth: depth),
+        cursors: (filter cursor_positions (ne user_id $session_user_id)),
+        show_cursor_labels: true,
+        placeholder: "Empty block"
+      ),
+
+      # Extension area for system-specific metadata
+      (extension_area area_name: "metadata", item_type: "block")
+    ),
+
+    # Drag-drop with constraint validation
+    drag_drop: (drop_zones
+      invalid_targets: ancestor_path,
+      on_drop: (move_block
+        source_id: $source_id,
+        target_id: $target_id,
+        position: $position
+      )
+    ),
+
+    # Attach standard block operations
+    behaviors: (standard_block_ops {
+      id: id,
+      parent_id: parent_id,
+      depth: depth,
+      content: content,
+      ancestor_path: ancestor_path
+    })
+  )
+)
+
+# ============================================================================
+# ALTERNATIVE: OUTLINER WITH HEADER/FOOTER
+# ============================================================================
+
+# Uncomment to use container with aggregates:
+
+# # Compute aggregates (available in header/footer/body)
+# group @current_root_block_id (
+#   derive [
+#     total_blocks = (count this),
+#     completed_blocks = (count (eq completed 1)),
+#     incomplete_blocks = (count (eq completed 0))
+#   ]
+# )
+#
+# render (container
+#   # Header: Access to aggregates only
+#   header: (row
+#     (icon source: "📝"),
+#     (text content: "My Workspace", weight: "bold", size: 18),
+#     (badge
+#       text: (format "{}/{} completed" completed_blocks total_blocks),
+#       color: "green"
+#     )
+#   ),
+#
+#   # Body: Each row has access to both row fields AND aggregates
+#   body: (each
+#     (block
+#       indent: (mul depth 24),
+#       bullet: (case [
+#         has_children => (collapse_button collapsed: is_collapsed),
+#         true => (empty)
+#       ]),
+#       content: (row
+#         (checkbox checked: completed),
+#         (editable_text content: content),
+#         # Row can reference aggregates!
+#         (badge
+#           text: (format "Block {}/{}" (add row_index 1) total_blocks),
+#           color: "blue"
+#         )
+#       ),
+#       drag_drop: (drop_zones
+#         invalid_targets: ancestor_path,
+#         on_drop: (move_block source_id: $source_id, target_id: $target_id, position: $position)
+#       ),
+#       behaviors: (block_operations operations: standard_block_ops, id: id, parent_id: parent_id)
+#     )
+#   ),
+#
+#   # Footer: Access to aggregates only
+#   footer: (row
+#     (button
+#       text: "+ Add Block",
+#       icon: "➕",
+#       on_click: (create_block parent_id: @current_root_block_id, index: 0, content: "")
+#     ),
+#     (button
+#       text: "Export",
+#       icon: "📤",
+#       on_click: (export_workspace workspace_id: @current_root_block_id)
+#     )
+#   )
+# )
+
+# ============================================================================
+# MULTI-TYPE OUTLINER (Tasks + JIRA + Calendar)
+# ============================================================================
+
+# Uncomment for multi-system integration:
+
+# from items  # Unified table across systems
+#
+# filter (ancestor_of id @current_root_block_id) or (eq id @current_root_block_id)
+#
+# # Determine item type
+# derive [
+#   item_type = (case [
+#     (eq source "todoist") => "task",
+#     (eq source "jira") => "issue",
+#     (eq source "calendar") => "event",
+#     (eq source "gmail") => "email",
+#     true => "unknown"
+#   ]),
+#
+#   # Tree structure
+#   ancestor_path = (recursive_ancestors id),
+#   depth = (count_ancestors parent_id),
+#   has_children = (exists (from items filter (eq parent_id items.id)))
+# ]
+#
+# filter is_visible or (eq depth 0)
+# sort sort_key
+#
+# # Join sync status
+# join sync_status (eq item_id items.id)
+#
+# # Join cursor state (persistent)
+# join cursor_positions (eq item_id items.id)
+#
+# render (list
+#   item_template: (block
+#     indent: (mul depth 24),
+#
+#     bullet: (case [
+#       has_children => (collapse_button collapsed: is_collapsed),
+#       true => (empty)
+#     ]),
+#
+#     content: (row
+#       # Core components (same for all types)
+#       (icon source: (get item_type_icon item_type)),
+#       (editable_text
+#         content: title,
+#         on_edit: (update id: id, fields: {title: $new_value}),
+#         on_key: (block_keys id: id, parent_id: parent_id, depth: depth),
+#         cursors: (filter cursor_positions (ne user_id $session_user_id))
+#       ),
+#
+#       # Sync state indicator
+#       (badge
+#         text: (case [
+#           (eq sync_status.state "synced") => "✓",
+#           (eq sync_status.state "pending") => "⏳",
+#           (eq sync_status.state "conflict") => "⚠️",
+#           true => ""
+#         ]),
+#         color: (get sync_status_color sync_status.state)
+#       ),
+#
+#       # Extension area: System-specific metadata
+#       # - Todoist: project name, section, priority
+#       # - JIRA: story points, sprint, status badge
+#       # - Calendar: date, time, location
+#       # - Gmail: sender, subject, unread status
+#       (extension_area area_name: "metadata", item_type: item_type),
+#
+#       # Extension area: System-specific actions
+#       # - Todoist: "View in Todoist" button
+#       # - JIRA: "View in JIRA" button, "Log time"
+#       # - Calendar: "Join meeting" button
+#       # - Gmail: "Reply", "Archive"
+#       (extension_area area_name: "actions", item_type: item_type)
+#     ),
+#
+#     # Drag-drop with constraints
+#     drag_drop: (drop_zones
+#       invalid_targets: ancestor_path,
+#       on_drop: (move_item source_id: $source_id, target_id: $target_id, position: $position)
+#     ),
+#
+#     # Behaviors attached by name (registered in app code)
+#     behaviors: (block_operations
+#       operations: standard_block_ops,
+#       id: id,
+#       parent_id: parent_id,
+#       depth: depth
+#     )
+#   )
+# )
+
+# ============================================================================
+# OPERATION IMPLEMENTATIONS (Rust)
+# ============================================================================
+
+# These operations are implemented in Rust and registered with the operation registry.
+# Each operation receives:
+#   - row_data: HashMap<String, Value> (all row fields from PRQL query)
+#   - ui_state: UiState (cursor_pos, focused_id from UI)
+#   - db: Database reference
+#
+# Operations extract what they need from row_data:
+#
+# trait Operation {
+#     fn name(&self) -> &str;
+#     fn execute(&self, row_data: &HashMap<String, Value>, ui_state: &UiState, db: &Database) -> Result<Action>;
+# }
+#
+# Example operation implementations:
+#
+# - indent: Extracts id, parent_id, depth from row_data → MoveBlock
+# - outdent: Extracts id, parent_id, depth from row_data → MoveBlock
+# - split: Extracts id, content from row_data + cursor_pos from ui_state → UpdateBlock + CreateBlock
+# - delete: Extracts id from row_data → DeleteBlock
+# - move_block: Receives $source_id, $target_id, $position from on_drop action → MoveBlock
+# - toggle_collapse: Extracts id from row_data → UpdateBlock
+
+# ============================================================================
+# FLUTTER IMPLEMENTATION NOTES
+# ============================================================================
+
+# 1. Data Flow:
+#    Rust backend → Stream<List<Map<String, Value>>> → Flutter
+#    Flutter UI → Operation requests → Rust backend
+#
+# 2. CDC Polling:
+#    Poll every 200ms for dirty blocks → Re-query → UI update
+#
+# 3. Widget Mapping:
+#    RenderNode → Flutter Widget:
+#    - list → ListView.builder (virtualized)
+#    - block → Padding + Column
+#    - row → Row
+#    - editable_text → TextField with FocusNode
+#    - drop_zone → DragTarget (drop_zones creates 3 DragTargets)
+#
+# 4. Expression Evaluation:
+#    - ColumnRef("content") → row["content"]
+#    - BinaryOp(Eq, ColumnRef("status"), Literal("completed")) → row["status"] == "completed"
+#    - FunctionCall("mul", [ColumnRef("depth"), Literal(24)]) → row["depth"] * 24
+#
+# 5. Action Dispatching:
+#    User interaction → Action → Rust FFI → Database mutation → CDC marks dirty → Poll detects → Re-query
+#
+# 6. Cursor Sync:
+#    - Loro ephemeral doc: Real-time cursor positions (sub-100ms)
+#    - Turso persistent: Periodic saves every 5 seconds + on blur
+#    - Merged at Flutter layer: cursors = loro_cursors + turso_cursors
+
+# ============================================================================
+# NAVIGATION EXAMPLES
+# ============================================================================
+
+# Zoom to a specific block:
+# UPDATE app_state SET current_root_block_id = 'block-123' WHERE user_id = $session_user_id;
+# → CDC detects change → Re-query with new app_state.current_root_block_id → UI shows subtree
+
+# Breadcrumbs from ancestor_path:
+# ancestor_path = "root,parent1,parent2,current"
+# Render as: Root > Parent1 > Parent2 > Current (clickable links)
+
+# Back navigation:
+# Store navigation stack in app_state:
+# CREATE TABLE navigation_stack (
+#   user_id TEXT,
+#   index INTEGER,
+#   root_block_id TEXT,
+#   PRIMARY KEY (user_id, index)
+# );
+
+# ============================================================================
+# PERFORMANCE CHARACTERISTICS
+# ============================================================================
+
+# Query Complexity:
+# - Recursive ancestor path: O(depth) per block (typical: 5-10 levels)
+# - Fractional index sort: O(N log N) (indexed)
+# - CDC polling: O(dirty_count) (typically 0-10 blocks)
+#
+# Flutter Rendering:
+# - ListView.builder: O(visible_items) (virtual scrolling)
+# - Widget diffing: O(changed_items) (Flutter's reconciliation)
+# - Drag-drop validation: O(log N) (binary search on ancestor_path)
+#
+# Typical Performance (1000 blocks):
+# - Full query: 10-50ms (indexed, precomputed ancestor_path)
+# - CDC poll: <1ms (SELECT WHERE _dirty = 1, indexed)
+# - UI render: 16ms @ 60fps (Flutter virtualization)
+# - Operation latency: 5-20ms (FFI + database mutation)
