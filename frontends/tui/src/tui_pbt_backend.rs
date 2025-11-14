@@ -1,6 +1,6 @@
 //! TUI-R3BL backend for property-based testing
 //!
-//! This module provides a CoreOperations implementation that wraps RenderEngine
+//! This module provides a CoreOperations implementation that wraps BackendEngine
 //! for PBT tests. It converts between the database representation (HashMap<String, Value>)
 //! and the Block API representation.
 
@@ -9,25 +9,25 @@ use rusty_knowledge::api::repository::{CoreOperations, Lifecycle};
 use rusty_knowledge::api::types::{ApiError, Block, BlockMetadata, NewBlock, Traversal, ROOT_PARENT_ID};
 use rusty_knowledge::storage::backend::StorageBackend;
 use rusty_knowledge::storage::types::{StorageEntity, Value};
-use rusty_knowledge::api::render_engine::RenderEngine;
+use rusty_knowledge::api::backend_engine::BackendEngine;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use anyhow;
 
 /// TUI-R3BL backend for PBT testing
 ///
-/// This backend wraps RenderEngine and implements CoreOperations by:
+/// This backend wraps BackendEngine and implements CoreOperations by:
 /// - Querying blocks via SQL queries to the blocks table
 /// - Converting HashMap<String, Value> to Block format
 /// - Using StorageBackend methods for CRUD operations
 #[derive(Clone)]
 pub struct TuiR3blPbtBackend {
-    engine: Arc<RwLock<RenderEngine>>,
+    engine: Arc<BackendEngine>,
 }
 
 impl TuiR3blPbtBackend {
-    /// Create a new PBT backend wrapping a RenderEngine
-    pub fn new(engine: Arc<RwLock<RenderEngine>>) -> Self {
+    /// Create a new PBT backend wrapping a BackendEngine
+    pub fn new(engine: Arc<BackendEngine>) -> Self {
         Self { engine }
     }
 
@@ -116,7 +116,7 @@ impl TuiR3blPbtBackend {
 
     /// Query all blocks from the database
     async fn query_all_blocks(&self) -> Result<Vec<StorageEntity>, ApiError> {
-        let engine = self.engine.read().await;
+        let engine = &*self.engine;
 
         // Query all blocks using SQL
         let sql = "SELECT * FROM blocks".to_string();
@@ -130,7 +130,7 @@ impl TuiR3blPbtBackend {
 
     /// Build children list for a block by querying all blocks
     async fn get_children_for_block(&self, parent_id: &str) -> Result<Vec<String>, ApiError> {
-        let engine = self.engine.read().await;
+        let engine = &*self.engine;
 
         // Map ROOT_PARENT_ID to NULL for database queries
         let sql = if parent_id == ROOT_PARENT_ID {
@@ -167,7 +167,7 @@ impl TuiR3blPbtBackend {
 
     /// Ensure blocks table schema exists
     pub async fn ensure_schema(&self) -> Result<(), ApiError> {
-        let engine = self.engine.read().await;
+        let engine = &*self.engine;
 
         // Check if blocks table exists by trying to query it
         let check_sql = "SELECT name FROM sqlite_master WHERE type='table' AND name='blocks'".to_string();
@@ -218,13 +218,14 @@ impl TuiR3blPbtBackend {
                 // Insert root block using backend
                 let root_entity_clone = root_entity.clone();
                 engine
-                    .with_backend_write(|backend| {
+                    .with_backend_write(|backend: &mut _| -> anyhow::Result<()> {
                         // Use block_in_place to execute async operation in sync context
                         tokio::task::block_in_place(|| {
                             tokio::runtime::Handle::current().block_on(
                                 backend.insert("blocks", root_entity_clone)
                             )
                         })
+                        .map_err(|e| anyhow::anyhow!("{}", e))
                     })
                     .await
                     .map_err(|e| ApiError::InternalError {
@@ -251,12 +252,13 @@ impl TuiR3blPbtBackend {
 
                 let first_child_entity_clone = first_child_entity.clone();
                 engine
-                    .with_backend_write(|backend| {
+                    .with_backend_write(|backend: &mut _| -> anyhow::Result<()> {
                         tokio::task::block_in_place(|| {
                             tokio::runtime::Handle::current().block_on(
                                 backend.insert("blocks", first_child_entity_clone)
                             )
                         })
+                        .map_err(|e| anyhow::anyhow!("{}", e))
                     })
                     .await
                     .map_err(|e| ApiError::InternalError {
@@ -274,7 +276,7 @@ impl CoreOperations for TuiR3blPbtBackend {
     async fn get_block(&self, id: &str) -> Result<Block, ApiError> {
         self.ensure_schema().await?;
 
-        let engine = self.engine.read().await;
+        let engine = &*self.engine;
 
         // Query block by ID
         let sql = format!("SELECT * FROM blocks WHERE id = '{}'", id);
@@ -409,7 +411,7 @@ impl CoreOperations for TuiR3blPbtBackend {
 
         // Verify parent exists (unless it's root)
         if parent_id != ROOT_PARENT_ID {
-            let engine = self.engine.read().await;
+            let engine = &*self.engine;
             let sql = format!("SELECT id FROM blocks WHERE id = '{}'", parent_id);
             let results = engine.execute_query(sql, HashMap::new()).await
                 .map_err(|e| ApiError::InternalError {
@@ -430,7 +432,7 @@ impl CoreOperations for TuiR3blPbtBackend {
                 })?
             } else {
                 // Get the last child's sort_key
-                let engine = self.engine.read().await;
+                let engine = &*self.engine;
                 let sql = format!("SELECT sort_key FROM blocks WHERE id = '{}'", children[children.len() - 1]);
                 let results = engine.execute_query(sql, HashMap::new()).await
                     .map_err(|e| ApiError::InternalError {
@@ -479,15 +481,16 @@ impl CoreOperations for TuiR3blPbtBackend {
         entity.insert("updated_at".to_string(), Value::Integer(now));
 
         // Insert into database using backend
-        let engine = self.engine.read().await;
+        let engine = &*self.engine;
         let entity_clone = entity.clone();
         engine
-            .with_backend_write(|backend| {
+            .with_backend_write(|backend: &mut _| -> anyhow::Result<()> {
                 tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(
                         backend.insert("blocks", entity_clone)
                     )
                 })
+                .map_err(|e| anyhow::anyhow!("{}", e))
             })
             .await
             .map_err(|e| ApiError::InternalError {
@@ -510,7 +513,7 @@ impl CoreOperations for TuiR3blPbtBackend {
     async fn update_block(&self, id: &str, content: String) -> Result<(), ApiError> {
         self.ensure_schema().await?;
 
-        let engine = self.engine.read().await;
+        let engine = &*self.engine;
 
         // Get existing block
         let sql = format!("SELECT * FROM blocks WHERE id = '{}'", id);
@@ -533,7 +536,7 @@ impl CoreOperations for TuiR3blPbtBackend {
         entity.insert("updated_at".to_string(), Value::Integer(now));
 
         engine
-            .with_backend_write(|backend| {
+            .with_backend_write(|backend: &mut _| -> anyhow::Result<()> {
                 let entity_clone = entity.clone();
                 let id_clone = id.to_string();
                 tokio::task::block_in_place(|| {
@@ -541,6 +544,7 @@ impl CoreOperations for TuiR3blPbtBackend {
                         backend.update("blocks", &id_clone, entity_clone)
                     )
                 })
+                .map_err(|e| anyhow::anyhow!("{}", e))
             })
             .await
             .map_err(|e| ApiError::InternalError {
@@ -560,7 +564,7 @@ impl CoreOperations for TuiR3blPbtBackend {
             });
         }
 
-        let engine = self.engine.read().await;
+        let engine = &*self.engine;
 
         // Check if block exists
         let sql = format!("SELECT id FROM blocks WHERE id = '{}'", id);
@@ -576,12 +580,13 @@ impl CoreOperations for TuiR3blPbtBackend {
         // Delete the block
         let id_clone = id.to_string();
         engine
-            .with_backend_write(|backend| {
+            .with_backend_write(|backend: &mut _| -> anyhow::Result<()> {
                 tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(
                         backend.delete("blocks", &id_clone)
                     )
                 })
+                .map_err(|e| anyhow::anyhow!("{}", e))
             })
             .await
             .map_err(|e| ApiError::InternalError {
@@ -606,7 +611,7 @@ impl CoreOperations for TuiR3blPbtBackend {
             });
         }
 
-        let engine = self.engine.read().await;
+        let engine = &*self.engine;
 
         // Get existing block
         let sql = format!("SELECT * FROM blocks WHERE id = '{}'", id);
@@ -678,7 +683,7 @@ impl CoreOperations for TuiR3blPbtBackend {
         entity.insert("updated_at".to_string(), Value::Integer(now));
 
         engine
-            .with_backend_write(|backend| {
+            .with_backend_write(|backend: &mut _| -> anyhow::Result<()> {
                 let entity_clone = entity.clone();
                 let id_clone = id.to_string();
                 tokio::task::block_in_place(|| {
@@ -686,6 +691,7 @@ impl CoreOperations for TuiR3blPbtBackend {
                         backend.update("blocks", &id_clone, entity_clone)
                     )
                 })
+                .map_err(|e| anyhow::anyhow!("{}", e))
             })
             .await
             .map_err(|e| ApiError::InternalError {
@@ -740,21 +746,21 @@ impl CoreOperations for TuiR3blPbtBackend {
 #[async_trait]
 impl Lifecycle for TuiR3blPbtBackend {
     async fn create_new(_doc_id: String) -> Result<Self, ApiError> {
-        // TuiR3blPbtBackend must be created with an existing RenderEngine
+        // TuiR3blPbtBackend must be created with an existing BackendEngine
         Err(ApiError::InternalError {
-            message: "TuiR3blPbtBackend must be created with RenderEngine via new()".to_string(),
+            message: "TuiR3blPbtBackend must be created with BackendEngine via new()".to_string(),
         })
     }
 
     async fn open_existing(_doc_id: String) -> Result<Self, ApiError> {
-        // TuiR3blPbtBackend must be created with an existing RenderEngine
+        // TuiR3blPbtBackend must be created with an existing BackendEngine
         Err(ApiError::InternalError {
-            message: "TuiR3blPbtBackend must be created with RenderEngine via new()".to_string(),
+            message: "TuiR3blPbtBackend must be created with BackendEngine via new()".to_string(),
         })
     }
 
     async fn dispose(&self) -> Result<(), ApiError> {
-        // Nothing to clean up - RenderEngine is managed externally
+        // Nothing to clean up - BackendEngine is managed externally
         Ok(())
     }
 }

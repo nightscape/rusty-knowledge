@@ -84,9 +84,15 @@ where
 
 /// Entities that support hierarchical tree structure
 pub trait BlockEntity: Send + Sync {
+    /// Get the entity's unique identifier
+    fn id(&self) -> &str;
+
     fn parent_id(&self) -> Option<&str>;
     fn sort_key(&self) -> &str;
     fn depth(&self) -> i64;
+
+    /// Get the block content (text content of the block)
+    fn content(&self) -> &str;
 }
 
 /// Entities that support task management (completion, priority, etc.)
@@ -96,10 +102,149 @@ pub trait TaskEntity: Send + Sync {
     fn due_date(&self) -> Option<DateTime<Utc>>;
 }
 
+/// Helper methods for block data source operations
+/// These are not operations themselves, but utilities used by operations
+#[async_trait]
+pub trait BlockDataSourceHelpers<T>: CrudOperationProvider<T> + DataSource<T>
+where
+    T: BlockEntity + Send + Sync + 'static,
+{
+    /// Get all siblings of a block, sorted by sort_key
+    async fn get_siblings(&self, block_id: &str) -> Result<Vec<T>> {
+        let block = self.get_by_id(block_id).await?
+            .ok_or_else(|| anyhow::anyhow!("Block not found"))?;
+        let parent_id = block.parent_id();
+
+        let siblings = if let Some(pid) = parent_id {
+            self.get_children(pid).await?
+        } else {
+            // For root blocks, get all root blocks
+            // We need to filter from all blocks - this is a limitation
+            // For now, return empty - will need get_root_blocks method
+            return Ok(vec![]);
+        };
+
+        Ok(siblings.into_iter()
+            .filter(|s| s.id() != block_id)
+            .collect())
+    }
+
+    /// Get the previous sibling (sibling with sort_key < current sort_key)
+    async fn get_prev_sibling(&self, block_id: &str) -> Result<Option<T>> {
+        let block = self.get_by_id(block_id).await?
+            .ok_or_else(|| anyhow::anyhow!("Block not found"))?;
+        let parent_id = block.parent_id();
+
+        let siblings = if let Some(pid) = parent_id {
+            self.get_children(pid).await?
+        } else {
+            return Ok(None);
+        };
+
+        let prev = siblings.into_iter()
+            .filter(|s| s.sort_key() < block.sort_key())
+            .max_by(|a, b| a.sort_key().cmp(b.sort_key()));
+        Ok(prev)
+    }
+
+    /// Get the next sibling (sibling with sort_key > current sort_key)
+    async fn get_next_sibling(&self, block_id: &str) -> Result<Option<T>> {
+        let block = self.get_by_id(block_id).await?
+            .ok_or_else(|| anyhow::anyhow!("Block not found"))?;
+        let parent_id = block.parent_id();
+
+        let siblings = if let Some(pid) = parent_id {
+            self.get_children(pid).await?
+        } else {
+            return Ok(None);
+        };
+
+        let next = siblings.into_iter()
+            .filter(|s| s.sort_key() > block.sort_key())
+            .min_by(|a, b| a.sort_key().cmp(b.sort_key()));
+        Ok(next)
+    }
+
+    /// Get the first child of a parent (lowest sort_key)
+    async fn get_first_child(&self, parent_id: Option<&str>) -> Result<Option<T>> {
+        let children = if let Some(pid) = parent_id {
+            self.get_children(pid).await?
+        } else {
+            // For root blocks, we need to get all blocks with no parent
+            // This is a limitation - we'd need a method to get root blocks
+            // For now, return None and handle in move_block
+            return Ok(None);
+        };
+
+        Ok(children.into_iter()
+            .min_by(|a, b| a.sort_key().cmp(b.sort_key())))
+    }
+
+    /// Get the last child of a parent (highest sort_key)
+    async fn get_last_child(&self, parent_id: Option<&str>) -> Result<Option<T>> {
+        let children = if let Some(pid) = parent_id {
+            self.get_children(pid).await?
+        } else {
+            return Ok(None);
+        };
+
+        Ok(children.into_iter()
+            .max_by(|a, b| a.sort_key().cmp(b.sort_key())))
+    }
+
+    /// Recursively update depths of all descendants when a parent's depth changes
+    async fn update_descendant_depths(&self, parent_id: &str, depth_delta: i64) -> Result<()> {
+        if depth_delta == 0 {
+            return Ok(());
+        }
+
+        let mut queue = vec![parent_id.to_string()];
+
+        while let Some(current_parent_id) = queue.pop() {
+            let children = self.get_children(&current_parent_id).await?;
+
+            for child in children {
+                let current_depth = child.depth();
+                let new_depth = current_depth + depth_delta;
+                self.set_field(child.id(), "depth", Value::Integer(new_depth)).await?;
+                queue.push(child.id().to_string());
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Rebalance all siblings of a parent to create uniform spacing
+    async fn rebalance_siblings(&self, parent_id: Option<&str>) -> Result<()> {
+        let children = if let Some(pid) = parent_id {
+            self.get_children(pid).await?
+        } else {
+            // For root blocks, we'd need a get_root_blocks method
+            // For now, skip rebalancing root blocks
+            return Ok(());
+        };
+
+        // Sort by current sort_key
+        let mut sorted_children: Vec<_> = children.into_iter().collect();
+        sorted_children.sort_by(|a, b| a.sort_key().cmp(b.sort_key()));
+
+        // Generate evenly-spaced keys
+        use crate::storage::fractional_index::gen_n_keys;
+        let new_keys = gen_n_keys(sorted_children.len())?;
+
+        // Update all siblings
+        for (child, new_key) in sorted_children.iter().zip(new_keys.iter()) {
+            self.set_field(child.id(), "sort_key", Value::String(new_key.clone())).await?;
+        }
+
+        Ok(())
+    }
+}
+
 /// Hierarchical structure operations (for any block-like entity)
 #[rusty_knowledge_macros::operations_trait]
 #[async_trait]
-pub trait MutableBlockDataSource<T>: CrudOperationProvider<T> + DataSource<T>
+pub trait MutableBlockDataSource<T>: BlockDataSourceHelpers<T>
 where
     T: BlockEntity + Send + Sync + 'static,
 {
@@ -124,25 +269,93 @@ where
     }
 
     /// Move block to different position (reorder within same parent or different parent)
-    async fn move_block(&self, id: &str, after_id: Option<&str>) -> Result<()> {
-        // Calculate new sort_key based on neighbors
-        let (prev_key, next_key) = if let Some(after) = after_id {
-            let after_block = self.get_by_id(after).await?
-                .ok_or_else(|| anyhow::anyhow!("Reference block not found"))?;
-            // TODO: Implement get_next_sibling helper
-            let next = None; // Placeholder - need to implement sibling lookup
-            (Some(after_block.sort_key().to_string()), next.map(|b: T| b.sort_key().to_string()))
+    ///
+    /// # Parameters
+    /// * `id` - Block ID to move
+    /// * `new_parent_id` - Target parent ID (or None for root)
+    /// * `after_block_id` - Optional anchor block (move after this block, or beginning if None)
+    async fn move_block(&self, id: &str, new_parent_id: Option<&str>, after_block_id: Option<&str>) -> Result<()> {
+        use crate::storage::fractional_index::{gen_key_between, MAX_SORT_KEY_LENGTH};
+
+        let block = self.get_by_id(id).await?
+            .ok_or_else(|| anyhow::anyhow!("Block not found"))?;
+        let old_depth = block.depth();
+
+        // Query predecessor and successor sort_keys
+        let (prev_key, next_key) = if after_block_id.is_none() {
+            // No after_block_id means "move to beginning" - insert before first child
+            let first_child = self.get_first_child(new_parent_id).await?;
+            let first_key = first_child.map(|c| c.sort_key().to_string());
+            (None, first_key)
         } else {
-            // TODO: Implement get_first_sibling helper
-            let first = None; // Placeholder
-            (None, first.map(|b: T| b.sort_key().to_string()))
+            // Insert after specific block
+            let after_block = self.get_by_id(after_block_id.unwrap()).await?
+                .ok_or_else(|| anyhow::anyhow!("Reference block not found"))?;
+            let prev_key = Some(after_block.sort_key().to_string());
+
+            // Find next sibling after the anchor block
+            let next_sibling = self.get_next_sibling(after_block_id.unwrap()).await?;
+            let next_key = next_sibling.map(|s| s.sort_key().to_string());
+            (prev_key, next_key)
         };
 
-        let new_key = crate::storage::fractional_index::gen_key_between(
+        // Generate new sort_key
+        let mut new_sort_key = gen_key_between(
             prev_key.as_deref(),
-            next_key.as_deref(),
+            next_key.as_deref()
         )?;
-        self.set_field(id, "sort_key", Value::String(new_key)).await
+
+        // Check if rebalancing needed
+        if new_sort_key.len() > MAX_SORT_KEY_LENGTH {
+            self.rebalance_siblings(new_parent_id).await?;
+
+            // Re-query neighbors after rebalancing
+            let (prev_key, next_key) = if after_block_id.is_none() {
+                let first_child = self.get_first_child(new_parent_id).await?;
+                let first_key = first_child.map(|c| c.sort_key().to_string());
+                (None, first_key)
+            } else {
+                let after_block = self.get_by_id(after_block_id.unwrap()).await?
+                    .ok_or_else(|| anyhow::anyhow!("Reference block not found"))?;
+                let prev_key = Some(after_block.sort_key().to_string());
+                let next_sibling = self.get_next_sibling(after_block_id.unwrap()).await?;
+                let next_key = next_sibling.map(|s| s.sort_key().to_string());
+                (prev_key, next_key)
+            };
+
+            new_sort_key = gen_key_between(
+                prev_key.as_deref(),
+                next_key.as_deref()
+            )?;
+        }
+
+        // Calculate new depth based on parent
+        let new_depth = if let Some(ref parent_id) = new_parent_id {
+            let parent = self.get_by_id(parent_id).await?
+                .ok_or_else(|| anyhow::anyhow!("Parent not found"))?;
+            parent.depth() + 1
+        } else {
+            0 // Root level
+        };
+
+        // Calculate depth delta for recursive updates
+        let depth_delta = new_depth - old_depth;
+
+        // Update block atomically
+        if let Some(parent_id) = new_parent_id {
+            self.set_field(id, "parent_id", Value::String(parent_id.to_string())).await?;
+        } else {
+            self.set_field(id, "parent_id", Value::Null).await?;
+        }
+        self.set_field(id, "sort_key", Value::String(new_sort_key)).await?;
+        self.set_field(id, "depth", Value::Integer(new_depth)).await?;
+
+        // Recursively update all descendants' depths by the same delta
+        if depth_delta != 0 {
+            self.update_descendant_depths(id, depth_delta).await?;
+        }
+
+        Ok(())
     }
 
     /// Move block out to parent's level (decrease indentation)
@@ -156,15 +369,133 @@ where
             .ok_or_else(|| anyhow::anyhow!("Parent not found"))?;
         let grandparent_id = parent.parent_id();
 
-        // Move to grandparent's children
-        let new_depth = block.depth() - 1;
+        // Move to grandparent's children, after parent
         if let Some(gp_id) = grandparent_id {
-            self.set_field(id, "parent_id", Value::String(gp_id.to_string())).await?;
+            self.move_block(id, Some(gp_id), Some(parent_id)).await?;
         } else {
-            self.set_field(id, "parent_id", Value::Null).await?;
+            self.move_block(id, None, Some(parent_id)).await?;
         }
-        self.set_field(id, "depth", Value::Integer(new_depth)).await?;
+
         Ok(())
+    }
+
+    /// Split a block at a given position
+    ///
+    /// Creates a new block with content after the cursor and truncates
+    /// the original block to content before the cursor. The new block
+    /// appears directly below the original block using fractional indexing.
+    ///
+    /// # Parameters
+    /// * `id` - Block ID to split
+    /// * `position` - Character position to split at (as i64, will be converted to usize)
+    async fn split_block(&self, id: &str, position: i64) -> Result<()> {
+        use uuid::Uuid;
+        use crate::storage::fractional_index::gen_key_between;
+
+        let block = self.get_by_id(id).await?
+            .ok_or_else(|| anyhow::anyhow!("Block not found"))?;
+
+        let content = block.content();
+
+        // Convert i64 to usize (validate it's non-negative and fits in usize)
+        if position < 0 {
+            return Err(anyhow::anyhow!("Position must be non-negative").into());
+        }
+        let position = position as usize;
+
+        // Validate offset is within bounds
+        if position > content.len() {
+            return Err(anyhow::anyhow!(
+                "Split position {} exceeds content length {}",
+                position,
+                content.len()
+            ).into());
+        }
+
+        // Split content at cursor
+        let mut content_before = content[..position].to_string();
+        let mut content_after = content[position..].to_string();
+
+        // Strip trailing whitespace from the old block
+        content_before = content_before.trim_end().to_string();
+
+        // Strip leading whitespace from the new block
+        content_after = content_after.trim_start().to_string();
+
+        // Generate new block ID
+        let new_block_id = Uuid::new_v4().to_string();
+
+        // Get next sibling's sort_key to position new block correctly
+        let next_sibling = self.get_next_sibling(id).await?;
+        let next_sort_key = next_sibling.map(|s| s.sort_key().to_string());
+
+        // Generate sort_key for new block (between current block and next sibling)
+        let new_sort_key = gen_key_between(
+            Some(block.sort_key()),
+            next_sort_key.as_deref()
+        )?;
+
+        // Get current timestamp
+        let now = chrono::Utc::now().timestamp_millis();
+
+        // Create new block using create method
+        let mut new_block_fields = HashMap::new();
+        new_block_fields.insert("id".to_string(), Value::String(new_block_id.clone()));
+        new_block_fields.insert("content".to_string(), Value::String(content_after));
+        new_block_fields.insert("parent_id".to_string(), {
+            if let Some(ref pid) = block.parent_id() {
+                Value::String(pid.to_string())
+            } else {
+                Value::Null
+            }
+        });
+        new_block_fields.insert("depth".to_string(), Value::Integer(block.depth()));
+        new_block_fields.insert("sort_key".to_string(), Value::String(new_sort_key));
+        new_block_fields.insert("created_at".to_string(), Value::Integer(now));
+        new_block_fields.insert("updated_at".to_string(), Value::Integer(now));
+        new_block_fields.insert("collapsed".to_string(), Value::Boolean(false));
+        new_block_fields.insert("completed".to_string(), Value::Boolean(false));
+        new_block_fields.insert("block_type".to_string(), Value::String("text".to_string()));
+
+        self.create(new_block_fields).await?;
+
+        // Update current block with truncated content
+        self.set_field(id, "content", Value::String(content_before)).await?;
+        self.set_field(id, "updated_at", Value::Integer(now)).await?;
+
+        Ok(())
+    }
+
+    /// Move a block up (swap with previous sibling)
+    async fn move_up(&self, id: &str) -> Result<()> {
+        let prev_sibling = self.get_prev_sibling(id).await?
+            .ok_or_else(|| anyhow::anyhow!("Cannot move up: no previous sibling"))?;
+
+        let block = self.get_by_id(id).await?
+            .ok_or_else(|| anyhow::anyhow!("Block not found"))?;
+        let parent_id = block.parent_id();
+
+        // Get the sibling before prev_sibling
+        let before_prev = self.get_prev_sibling(prev_sibling.id()).await?;
+
+        if let Some(before_id) = before_prev {
+            self.move_block(id, parent_id, Some(before_id.id())).await
+        } else {
+            // Move to beginning
+            self.move_block(id, parent_id, None).await
+        }
+    }
+
+    /// Move a block down (swap with next sibling)
+    async fn move_down(&self, id: &str) -> Result<()> {
+        let next_sibling = self.get_next_sibling(id).await?
+            .ok_or_else(|| anyhow::anyhow!("Cannot move down: no next sibling"))?;
+
+        let block = self.get_by_id(id).await?
+            .ok_or_else(|| anyhow::anyhow!("Block not found"))?;
+        let parent_id = block.parent_id();
+
+        self.move_block(id, parent_id, Some(next_sibling.id())).await
     }
 }
 
@@ -195,11 +526,20 @@ where
     }
 }
 
+// Blanket implementations: Automatically provide helper methods for any compatible type
+impl<T, D> BlockDataSourceHelpers<T> for D
+where
+    T: BlockEntity + Send + Sync + 'static,
+    D: CrudOperationProvider<T> + DataSource<T>,
+{
+    // All methods have default implementations, so nothing to implement here
+}
+
 // Blanket implementations: Automatically provide operations for any compatible type
 impl<T, D> MutableBlockDataSource<T> for D
 where
     T: BlockEntity + Send + Sync + 'static,
-    D: DataSource<T> + CrudOperationProvider<T>,
+    D: BlockDataSourceHelpers<T>,
 {
 }
 
@@ -313,13 +653,40 @@ pub trait OperationRegistry: Send + Sync {
 /// using the format "{provider_name}.sync" (e.g., "todoist.sync", "jira.sync").
 #[async_trait]
 pub trait SyncableProvider: Send + Sync {
+    /// Get the provider name (e.g., "todoist", "jira")
+    ///
+    /// This name is used to generate sync operations and identify the provider.
+    fn provider_name(&self) -> &str;
+
     /// Sync data from the external system
     ///
     /// This method should:
-    /// - Fetch updates from the external system
+    /// - Fetch updates from the external system using the provided stream position
     /// - Emit changes via streams (if applicable)
-    /// - Update internal state (sync tokens, etc.)
-    async fn sync(&mut self) -> Result<()>;
+    /// - Return the new stream position for persistence
+    ///
+    /// # Arguments
+    /// * `position` - Current stream position (StreamPosition::Beginning for full sync, StreamPosition::Version(token) for incremental sync)
+    ///
+    /// # Returns
+    /// The new stream position (typically StreamPosition::Version with new token, or StreamPosition::Beginning if no token)
+    async fn sync(&self, position: StreamPosition) -> Result<StreamPosition>;
+}
+
+/// Trait for external sync providers that emit typed change streams
+///
+/// This trait allows QueryableCache to register and consume change streams
+/// from external systems (Todoist, etc.) in a type-safe way.
+/// ExternalServiceDiscovery
+pub trait StreamProvider<T>: Send + Sync
+where
+    T: Send + Sync + 'static,
+{
+    /// Get a receiver for changes of type T
+    ///
+    /// Returns a broadcast receiver that emits batches of changes.
+    /// Multiple QueryableCache instances can subscribe to the same stream.
+    fn subscribe(&self) -> tokio::sync::broadcast::Receiver<Vec<Change<T>>>;
 }
 
 /// Generate a sync operation descriptor for a provider
@@ -345,3 +712,7 @@ pub fn generate_sync_operation(provider_name: &str) -> OperationDescriptor {
 pub use __operations_crud_operation_provider::crud_operation_provider_operations;
 pub use __operations_mutable_block_data_source::mutable_block_data_source_operations;
 pub use __operations_mutable_task_data_source::mutable_task_data_source_operations;
+
+#[cfg(test)]
+#[path = "datasource_tests.rs"]
+mod datasource_tests;

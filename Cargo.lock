@@ -1984,6 +1984,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "37909eebbb50d72f9059c3b6d82c0463f2ff062c9e95845c43a6c9c0355411be"
 
 [[package]]
+name = "ferrous-di"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "tokio",
+]
+
+[[package]]
 name = "fiat-crypto"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6263,6 +6271,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "cucumber",
+ "ferrous-di",
  "futures",
  "iroh",
  "loro",
@@ -6318,6 +6327,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "ferrous-di",
  "futures",
  "proptest",
  "proptest-state-machine",
@@ -7873,6 +7883,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "ferrous-di",
  "is_ci",
  "libsql",
  "miette",

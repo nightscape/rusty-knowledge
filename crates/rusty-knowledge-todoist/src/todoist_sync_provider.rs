@@ -7,11 +7,10 @@
 //! - Fire-and-forget operations - updates arrive via streams
 
 use std::sync::Arc;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::broadcast;
 use async_trait::async_trait;
 
-use rusty_knowledge::core::datasource::{Change, ChangeOrigin, Result, SyncableProvider};
-use rusty_knowledge::core::StreamCache as QueryableCache;
+use rusty_knowledge::core::datasource::{Change, ChangeOrigin, Result, SyncableProvider, StreamProvider, StreamPosition};
 
 use crate::client::TodoistClient;
 use crate::models::{SyncResponse, TodoistTask, TodoistProject, TodoistTaskApiResponse};
@@ -25,37 +24,16 @@ pub struct TodoistSyncProvider {
     pub(crate) client: TodoistClient,
     task_tx: broadcast::Sender<Vec<Change<TodoistTask>>>,
     project_tx: broadcast::Sender<Vec<Change<TodoistProject>>>,
-    sync_token: Arc<RwLock<Option<String>>>,
-}
-
-/// Builder for TodoistSyncProvider with cache registration
-pub struct TodoistSyncProviderBuilder {
-    provider: TodoistSyncProvider,
-    registrations: Vec<Box<dyn FnOnce(&TodoistSyncProvider) + Send>>,
 }
 
 impl TodoistSyncProvider {
-    /// Create a new TodoistSyncProvider with builder pattern
-    pub fn new(client: TodoistClient) -> TodoistSyncProviderBuilder {
-        let (task_tx, _) = broadcast::channel(1000); // Buffer up to 1000 batches
-        let (project_tx, _) = broadcast::channel(1000);
-
-        TodoistSyncProviderBuilder {
-            provider: TodoistSyncProvider {
-                client,
-                task_tx,
-                project_tx,
-                sync_token: Arc::new(RwLock::new(None)),
-            },
-            registrations: vec![],
+    pub fn new(client: TodoistClient) -> Self {
+        Self {
+            client,
+            task_tx: broadcast::channel(1000).0,
+            project_tx: broadcast::channel(1000).0,
         }
     }
-
-    /// Create from API key (convenience method)
-    pub fn from_api_key(api_key: &str) -> TodoistSyncProviderBuilder {
-        Self::new(TodoistClient::new(api_key))
-    }
-
 
     /// Get a receiver for task changes (for testing or manual wiring)
     pub fn subscribe_tasks(&self) -> broadcast::Receiver<Vec<Change<TodoistTask>>> {
@@ -66,37 +44,32 @@ impl TodoistSyncProvider {
     pub fn subscribe_projects(&self) -> broadcast::Receiver<Vec<Change<TodoistProject>>> {
         self.project_tx.subscribe()
     }
-
-    /// Get the current sync token (for testing)
-    pub async fn get_sync_token(&self) -> Option<String> {
-        let sync_token = self.sync_token.read().await;
-        sync_token.clone()
-    }
 }
 
 #[async_trait]
 impl SyncableProvider for TodoistSyncProvider {
+    fn provider_name(&self) -> &str {
+        "todoist"
+    }
+
     /// Trigger sync - ONE API call, emits on multiple streams
     ///
     /// This method:
     /// 1. Calls sync_items() API (returns tasks + projects in one response)
-    /// 2. Updates sync_token
-    /// 3. Splits response into task and project changes
-    /// 4. Emits changes on separate typed streams
-    async fn sync(&mut self) -> Result<()> {
-        let token = {
-            let sync_token = self.sync_token.read().await;
-            sync_token.clone()
+    /// 2. Splits response into task and project changes
+    /// 3. Emits changes on separate typed streams
+    /// 4. Returns the new stream position for persistence
+    async fn sync(&self, position: StreamPosition) -> Result<StreamPosition> {
+        // Extract sync token from StreamPosition
+        let token_str = match &position {
+            StreamPosition::Beginning => None, // Full sync
+            StreamPosition::Version(bytes) => {
+                std::str::from_utf8(bytes).ok()
+            }
         };
 
         // Make ONE API call that returns both tasks and projects
-        let response = self.client.sync_items(token.as_deref()).await?;
-
-        // Update sync token
-        if let Some(new_token) = response.sync_token.clone() {
-            let mut sync_token = self.sync_token.write().await;
-            *sync_token = Some(new_token);
-        }
+        let response = self.client.sync_items(token_str).await?;
 
         // Split and emit on separate typed streams
         let task_changes = compute_task_changes(&response);
@@ -111,44 +84,26 @@ impl SyncableProvider for TodoistSyncProvider {
         }
         let _ = self.project_tx.send(project_changes);
 
-        Ok(())
+        // Return the new sync token as StreamPosition::Version
+        // If no token is returned, return Beginning (though this shouldn't happen in practice)
+        match response.sync_token {
+            Some(token) => Ok(StreamPosition::Version(token.as_bytes().to_vec())),
+            None => Ok(StreamPosition::Beginning), // Fallback - shouldn't happen
+        }
     }
 }
 
-impl TodoistSyncProviderBuilder {
-    /// Register a cache for tasks
-    ///
-    /// This wires up the task stream to the cache's ingest_stream method.
-    pub fn with_tasks(mut self, cache: Arc<QueryableCache<TodoistTask>>) -> Self {
-        let cache_clone = Arc::clone(&cache);
-        self.registrations.push(Box::new(move |provider: &TodoistSyncProvider| {
-            let rx = provider.subscribe_tasks();
-            cache_clone.ingest_stream(rx);
-        }));
-        self
+// ExternalServiceDiscovery
+impl StreamProvider<TodoistTask> for TodoistSyncProvider {
+    fn subscribe(&self) -> tokio::sync::broadcast::Receiver<Vec<Change<TodoistTask>>> {
+        self.subscribe_tasks()
     }
+}
 
-    /// Register a cache for projects
-    ///
-    /// This wires up the project stream to the cache's ingest_stream method.
-    pub fn with_projects(mut self, cache: Arc<QueryableCache<TodoistProject>>) -> Self {
-        let cache_clone = Arc::clone(&cache);
-        self.registrations.push(Box::new(move |provider: &TodoistSyncProvider| {
-            let rx = provider.subscribe_projects();
-            cache_clone.ingest_stream(rx);
-        }));
-        self
-    }
-
-    /// Build the provider and execute all registrations
-    ///
-    /// This wires up all registered caches to their respective streams.
-    pub fn build(mut self) -> TodoistSyncProvider {
-        // Execute all registrations to wire up streams
-        for register in self.registrations.drain(..) {
-            register(&self.provider);
-        }
-        self.provider
+// ExternalServiceDiscovery
+impl StreamProvider<TodoistProject> for TodoistSyncProvider {
+    fn subscribe(&self) -> tokio::sync::broadcast::Receiver<Vec<Change<TodoistProject>>> {
+        self.subscribe_projects()
     }
 }
 
@@ -207,41 +162,3 @@ fn compute_project_changes(_response: &SyncResponse) -> Vec<Change<TodoistProjec
     // 2. Or modify sync() to call both APIs
     vec![]
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn test_provider_creation() {
-        let client = TodoistClient::new("test_api_key");
-        let builder = TodoistSyncProvider::new(client);
-        let provider = builder.build();
-
-        // Verify provider was created
-        assert!(provider.get_sync_token().await.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_provider_builder_with_tasks() {
-        use rusty_knowledge::storage::turso::TursoBackend;
-        use crate::todoist_datasource::TodoistTaskDataSource;
-
-        let client = TodoistClient::new("test_api_key");
-        let datasource = Arc::new(TodoistTaskDataSource::from_api_key("test_api_key"));
-        let db = Arc::new(RwLock::new(Box::new(TursoBackend::new_in_memory().await.unwrap()) as Box<dyn rusty_knowledge::storage::backend::StorageBackend>));
-
-        let cache = Arc::new(QueryableCache::new(
-            datasource,
-            db,
-            "todoist_tasks".to_string(),
-        ));
-
-        let builder = TodoistSyncProvider::new(client);
-        let provider = builder.with_tasks(cache).build();
-
-        // Verify provider was created with cache registered
-        assert!(provider.get_sync_token().await.is_none());
-    }
-}
-

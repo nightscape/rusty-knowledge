@@ -19,6 +19,256 @@ fn get_field_name(op: &query_render::OperationWiring) -> String {
     op.modified_param.clone()
 }
 
+/// Extract operation info from an element at the given index
+/// Returns (operation_name, table, id_column, field) if found
+fn extract_operation_info(element_tree: &[UIElement], index: usize) -> Option<(String, String, String, String)> {
+    element_tree.get(index)
+        .and_then(|element| element.find_editable_text())
+        .and_then(|editable| {
+            if let UIElement::EditableText { operations, .. } = editable {
+                operations.first().map(|op| (
+                    op.descriptor.name.clone(),
+                    op.descriptor.table.clone(),
+                    op.descriptor.id_column.clone(),
+                    get_field_name(op),
+                ))
+            } else {
+                None
+            }
+        })
+}
+
+/// Extract buffer content as a string (joining lines with \n)
+fn extract_buffer_content(buffer: &r3bl_tui::EditorBuffer) -> String {
+    let lines = buffer.get_lines();
+    let mut buffer_content = String::new();
+    let mut i = 0;
+    loop {
+        if let Some(line) = lines.get_line_content(row(i)) {
+            if !buffer_content.is_empty() {
+                buffer_content.push('\n');
+            }
+            buffer_content.push_str(line);
+            i += 1;
+        } else {
+            break;
+        }
+    }
+    buffer_content
+}
+
+/// Send an operation signal to save block content
+fn send_save_operation_signal(
+    global_data: &mut GlobalData<State, AppSignal>,
+    editing_idx: usize,
+    operation_info: (String, String, String, String),
+    buffer_content: String,
+) {
+    let (operation_name, table, id_column, field) = operation_info;
+    if let Some(row_data) = global_data.state.data.get(editing_idx) {
+        if let Some(id_value) = row_data.get(&id_column) {
+            if let Some(id_str) = id_value.as_string() {
+                let new_value = rusty_knowledge::storage::types::Value::String(buffer_content);
+                let op_signal = AppSignal::ExecuteOperation {
+                    operation_name: operation_name.clone(),
+                    table,
+                    id_column,
+                    id_value: id_str.to_string(),
+                    field,
+                    new_value,
+                };
+                send_signal!(
+                    global_data.main_thread_channel_sender,
+                    TerminalWindowMainThreadSignal::ApplyAppSignal(op_signal)
+                );
+                global_data.state.status_message = "Saving...".to_string();
+            }
+        }
+    }
+}
+
+/// Exit edit mode and clear editor state
+fn exit_edit_mode(
+    component: &mut BlockListComponent,
+    global_data: &mut GlobalData<State, AppSignal>,
+) {
+    global_data.state.editing_block_index = None;
+    global_data.state.editing_buffer = None;
+    component.editor_engine = None;
+}
+
+/// Save and exit edit mode for a block at the given index
+fn save_and_exit_edit_mode(
+    component: &mut BlockListComponent,
+    global_data: &mut GlobalData<State, AppSignal>,
+    editing_idx: usize,
+) -> bool {
+    if let Some(buffer) = &global_data.state.editing_buffer {
+        if let Some(operation_info) = extract_operation_info(&component.element_tree, editing_idx) {
+            let buffer_content = extract_buffer_content(buffer);
+            exit_edit_mode(component, global_data);
+            send_save_operation_signal(global_data, editing_idx, operation_info, buffer_content);
+            return true;
+        }
+    }
+    false
+}
+
+/// Ensure editor engine exists and has a valid viewport
+fn ensure_editor_engine(component: &mut BlockListComponent) -> &mut EditorEngine {
+    if component.editor_engine.is_none() {
+        component.editor_engine = Some(EditorEngine::new(EditorEngineConfig {
+            multiline_mode: r3bl_tui::LineMode::MultiLine,
+            syntax_highlight: r3bl_tui::SyntaxHighlightMode::Disable,
+            edit_mode: r3bl_tui::EditMode::ReadWrite,
+        }));
+    }
+    let editor_engine = component.editor_engine.as_mut().unwrap();
+    if editor_engine.viewport() == Size::default() {
+        editor_engine.current_box.style_adjusted_bounds_size = width(200) + height(50);
+    }
+    editor_engine
+}
+
+/// Save the current editing block without exiting edit mode
+/// Used when switching between blocks
+fn save_current_block_without_exit(
+    component: &mut BlockListComponent,
+    global_data: &mut GlobalData<State, AppSignal>,
+    editing_idx: usize,
+) {
+    if let Some(buffer) = &global_data.state.editing_buffer {
+        if let Some(operation_info) = extract_operation_info(&component.element_tree, editing_idx) {
+            let buffer_content = extract_buffer_content(buffer);
+            send_save_operation_signal(global_data, editing_idx, operation_info, buffer_content);
+        }
+    }
+}
+
+/// Execute an operation and set status message
+fn execute_operation_with_status(
+    global_data: &mut GlobalData<State, AppSignal>,
+    op_name: &str,
+    success_msg: &str,
+    ui_state: Option<rusty_knowledge::api::UiState>,
+) -> bool {
+    match global_data.state.execute_operation_on_selected(op_name, ui_state) {
+        Ok(_) => {
+            global_data.state.status_message = success_msg.to_string();
+            true
+        }
+        Err(e) => {
+            global_data.state.status_message = format!("{} failed: {}", op_name, e);
+            false
+        }
+    }
+}
+
+/// Create an empty modifier keys mask
+fn empty_modifier_mask() -> r3bl_tui::ModifierKeysMask {
+    r3bl_tui::ModifierKeysMask {
+        ctrl_key_state: KeyState::NotPressed,
+        shift_key_state: KeyState::NotPressed,
+        alt_key_state: KeyState::NotPressed,
+    }
+}
+
+/// Toggle completion for the selected block
+fn toggle_completion(
+    component: &mut BlockListComponent,
+    global_data: &mut GlobalData<State, AppSignal>,
+) -> CommonResult<EventPropagation> {
+    throws_with_return!({
+        if global_data.state.selected_index < component.element_tree.len() {
+            let element = &component.element_tree[global_data.state.selected_index];
+            if let Some(operation) = element.get_operation() {
+                if let Some(row) = global_data.state.data.get(global_data.state.selected_index) {
+                    if let Some(id_value) = row.get(&operation.descriptor.id_column) {
+                        if let Some(id_str) = id_value.as_string() {
+                            if let Some(field_value) = row.get(&get_field_name(operation)) {
+                                let bool_val = match field_value {
+                                    rusty_knowledge::storage::types::Value::Boolean(b) => *b,
+                                    rusty_knowledge::storage::types::Value::Integer(i) => *i != 0,
+                                    _ => {
+                                        global_data.state.status_message = format!("Field {} is not a boolean or integer", get_field_name(operation));
+                                        return Ok(EventPropagation::ConsumedRender);
+                                    }
+                                };
+                                let op_signal = AppSignal::ExecuteOperation {
+                                    operation_name: operation.descriptor.name.clone(),
+                                    table: operation.descriptor.table.clone(),
+                                    id_column: operation.descriptor.id_column.clone(),
+                                    id_value: id_str.to_string(),
+                                    field: get_field_name(operation),
+                                    new_value: rusty_knowledge::storage::types::Value::Boolean(!bool_val),
+                                };
+                                send_signal!(
+                                    global_data.main_thread_channel_sender,
+                                    TerminalWindowMainThreadSignal::ApplyAppSignal(op_signal)
+                                );
+                                global_data.state.status_message = "Toggling completion...".to_string();
+                                EventPropagation::ConsumedRender
+                            } else {
+                                global_data.state.status_message = format!("Field {} not found in row", get_field_name(operation));
+                                EventPropagation::ConsumedRender
+                            }
+                        } else {
+                            global_data.state.status_message = format!("ID column {} is not a string", operation.descriptor.id_column);
+                            EventPropagation::ConsumedRender
+                        }
+                    } else {
+                        global_data.state.status_message = format!("ID column {} not found", operation.descriptor.id_column);
+                        EventPropagation::ConsumedRender
+                    }
+                } else {
+                    global_data.state.status_message = format!("No data at index {}", global_data.state.selected_index);
+                    EventPropagation::ConsumedRender
+                }
+            } else {
+                global_data.state.status_message = format!("No operation found for element at index {}", global_data.state.selected_index);
+                EventPropagation::ConsumedRender
+            }
+        } else {
+            global_data.state.status_message = format!("Selected index {} out of bounds (len: {})", global_data.state.selected_index, component.element_tree.len());
+            EventPropagation::ConsumedRender
+        }
+    });
+}
+
+/// Handle split block operation
+fn handle_split_block(
+    component: &mut BlockListComponent,
+    global_data: &mut GlobalData<State, AppSignal>,
+) -> CommonResult<EventPropagation> {
+    throws_with_return!({
+        let cursor_offset = match global_data.state.calculate_cursor_offset() {
+            Ok(offset) => offset,
+            Err(e) => {
+                global_data.state.status_message = format!("Split failed: {}", e);
+                return Ok(EventPropagation::ConsumedRender);
+            }
+        };
+        let block_id = match global_data.state.selected_block_id() {
+            Some(id) => id,
+            None => {
+                global_data.state.status_message = "Split failed: No block selected".to_string();
+                return Ok(EventPropagation::ConsumedRender);
+            }
+        };
+        let ui_state = rusty_knowledge::api::UiState {
+            cursor_pos: Some(rusty_knowledge::api::CursorPosition {
+                block_id: block_id.clone(),
+                offset: cursor_offset,
+            }),
+            focused_id: Some(block_id),
+        };
+        if execute_operation_with_status(global_data, "split_block", "Splitting block...", Some(ui_state)) {
+            exit_edit_mode(component, global_data);
+        }
+        EventPropagation::ConsumedRender
+    });
+}
+
 /// Component that displays and manages the block list with hierarchical structure
 pub struct BlockListComponent {
     id: FlexBoxId,
@@ -68,56 +318,14 @@ impl BlockListComponent {
             match action {
                 Action::Operation(op_name) => {
                     // Execute operation on selected block
-                    match global_data.state.execute_operation_on_selected(op_name, None) {
-                        Ok(_) => {
-                            global_data.state.status_message = format!("Executing {}...", op_name);
-                            EventPropagation::ConsumedRender
-                        }
-                        Err(e) => {
-                            global_data.state.status_message = format!("{} failed: {}", op_name, e);
-                            EventPropagation::ConsumedRender
-                        }
-                    }
+                    execute_operation_with_status(global_data, op_name, &format!("Executing {}...", op_name), None);
+                    EventPropagation::ConsumedRender
                 }
                 Action::Special(special_action) => {
                     match special_action.as_str() {
                         "toggle_completion" => {
                             // Handle toggle completion (the 'x' key behavior)
-                            if global_data.state.selected_index < self.element_tree.len() {
-                                let element = &self.element_tree[global_data.state.selected_index];
-                                if let Some(operation) = element.get_operation() {
-                                    if let Some(row) = global_data.state.data.get(global_data.state.selected_index) {
-                                        if let Some(id_value) = row.get(&operation.descriptor.id_column) {
-                                            if let Some(id_str) = id_value.as_string() {
-                                                if let Some(field_value) = row.get(&get_field_name(operation)) {
-                                                    let bool_val = match field_value {
-                                                        rusty_knowledge::storage::types::Value::Boolean(b) => *b,
-                                                        rusty_knowledge::storage::types::Value::Integer(i) => *i != 0,
-                                                        _ => {
-                                                            global_data.state.status_message = format!("Field {} is not a boolean or integer", get_field_name(operation));
-                                                            return Ok(EventPropagation::ConsumedRender);
-                                                        }
-                                                    };
-                                                    let op_signal = AppSignal::ExecuteOperation {
-                                                        operation_name: operation.descriptor.name.clone(),
-                                                        table: operation.descriptor.table.clone(),
-                                                        id_column: operation.descriptor.id_column.clone(),
-                                                        id_value: id_str.to_string(),
-                                                        field: get_field_name(operation),
-                                                        new_value: rusty_knowledge::storage::types::Value::Boolean(!bool_val),
-                                                    };
-                                                    send_signal!(
-                                                        global_data.main_thread_channel_sender,
-                                                        TerminalWindowMainThreadSignal::ApplyAppSignal(op_signal)
-                                                    );
-                                                    global_data.state.status_message = "Toggling completion...".to_string();
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            EventPropagation::ConsumedRender
+                            return toggle_completion(self, global_data);
                         }
                         "start_editing" => {
                             // Start editing the selected block
@@ -133,41 +341,7 @@ impl BlockListComponent {
                         }
                         "split_block" => {
                             // Split block at cursor position
-                            let cursor_offset = match global_data.state.calculate_cursor_offset() {
-                                Ok(offset) => offset,
-                                Err(e) => {
-                                    global_data.state.status_message = format!("Split failed: {}", e);
-                                    return Ok(EventPropagation::ConsumedRender);
-                                }
-                            };
-                            let block_id = match global_data.state.selected_block_id() {
-                                Some(id) => id,
-                                None => {
-                                    global_data.state.status_message = "Split failed: No block selected".to_string();
-                                    return Ok(EventPropagation::ConsumedRender);
-                                }
-                            };
-                            let ui_state = rusty_knowledge::api::render_engine::UiState {
-                                cursor_pos: Some(rusty_knowledge::api::render_engine::CursorPosition {
-                                    block_id: block_id.clone(),
-                                    offset: cursor_offset,
-                                }),
-                                focused_id: Some(block_id),
-                            };
-                            match global_data.state.execute_operation_on_selected("split_block", Some(ui_state)) {
-                                Ok(_) => {
-                                    global_data.state.status_message = "Splitting block...".to_string();
-                                    // Exit edit mode after split
-                                    global_data.state.editing_block_index = None;
-                                    global_data.state.editing_buffer = None;
-                                    self.editor_engine = None;
-                                    EventPropagation::ConsumedRender
-                                }
-                                Err(e) => {
-                                    global_data.state.status_message = format!("Split failed: {}", e);
-                                    EventPropagation::ConsumedRender
-                                }
-                            }
+                            return handle_split_block(self, global_data);
                         }
                         _ => {
                             global_data.state.status_message = format!("Unknown special action: {}", special_action);
@@ -185,77 +359,11 @@ impl BlockListComponent {
         &mut self,
         global_data: &mut GlobalData<State, AppSignal>,
     ) -> bool {
-        // Check if we're editing a block
         if let Some(editing_idx) = global_data.state.editing_block_index {
-            if let Some(buffer) = &global_data.state.editing_buffer {
-                // Extract operation info from the EditableText
-                let operation_info = if let Some(element) = self.element_tree.get(editing_idx) {
-                    element.find_editable_text()
-                        .and_then(|editable| {
-                            if let UIElement::EditableText { operations, .. } = editable {
-                                operations.first().map(|op| (
-                                    op.descriptor.name.clone(),
-                                    op.descriptor.table.clone(),
-                                    op.descriptor.id_column.clone(),
-                                    get_field_name(op),
-                                ))
-                            } else {
-                                None
-                            }
-                        })
-                } else {
-                    None
-                };
-
-                // Get content from buffer - join all lines with \n
-                let lines = buffer.get_lines();
-                let mut buffer_content = String::new();
-                let mut i = 0;
-                loop {
-                    if let Some(line) = lines.get_line_content(row(i)) {
-                        if !buffer_content.is_empty() {
-                            buffer_content.push('\n');
-                        }
-                        buffer_content.push_str(line);
-                        i += 1;
-                    } else {
-                        break;
-                    }
-                }
-
-                // Exit edit mode and clear buffer first (release mutable borrow)
-                global_data.state.editing_block_index = None;
-                global_data.state.editing_buffer = None;
-                // Clear editor engine when exiting edit mode
-                self.editor_engine = None;
-
-                // Now we can borrow state.data immutably
-                if let Some((operation_name, table, id_column, field)) = operation_info {
-                    if let Some(row_data) = global_data.state.data.get(editing_idx) {
-                        if let Some(id_value) = row_data.get(&id_column) {
-                            if let Some(id_str) = id_value.as_string() {
-                                let new_value = rusty_knowledge::storage::types::Value::String(buffer_content);
-                                let op_signal = AppSignal::ExecuteOperation {
-                                    operation_name: operation_name.clone(),
-                                    table,
-                                    id_column,
-                                    id_value: id_str.to_string(),
-                                    field,
-                                    new_value,
-                                };
-                                send_signal!(
-                                    global_data.main_thread_channel_sender,
-                                    TerminalWindowMainThreadSignal::ApplyAppSignal(op_signal)
-                                );
-                                global_data.state.status_message = "Saving...".to_string();
-                                return true;
-                            }
-                        }
-                    }
-                }
-            }
+            save_and_exit_edit_mode(self, global_data, editing_idx)
+        } else {
+            false
         }
-        false
     }
 
     /// Start editing the currently selected block
@@ -342,9 +450,10 @@ impl Component<State, AppSignal> for BlockListComponent {
             self.rebuild_element_tree(global_data);
 
             // Ensure we're always editing the selected block (unless we're already editing it)
+            // Only do this if the selected block has an editable_text widget
             if global_data.state.editing_block_index != Some(global_data.state.selected_index) {
                 // We should be editing but aren't, or we're editing a different block
-                // Start editing the selected block
+                // Start editing the selected block ONLY if it has editable_text
                 if global_data.state.selected_index < self.element_tree.len() {
                     let element = &self.element_tree[global_data.state.selected_index];
                     if element.find_editable_text().is_some() {
@@ -352,54 +461,18 @@ impl Component<State, AppSignal> for BlockListComponent {
                         if let Some(editing_idx) = global_data.state.editing_block_index {
                             if editing_idx != global_data.state.selected_index {
                                 // Save the previous block before switching
-                                if let Some(buffer) = &global_data.state.editing_buffer {
-                                    let lines = buffer.get_lines();
-                                    if let Some(element) = self.element_tree.get(editing_idx) {
-                                        if let Some(editable_text) = element.find_editable_text() {
-                                            if let UIElement::EditableText { operations, .. } = editable_text {
-                                                if let Some(op) = operations.first() {
-                                                    let mut buffer_content = String::new();
-                                                    let mut i = 0;
-                                                    loop {
-                                                        if let Some(line) = lines.get_line_content(row(i)) {
-                                                            if !buffer_content.is_empty() {
-                                                                buffer_content.push('\n');
-                                                            }
-                                                            buffer_content.push_str(line);
-                                                            i += 1;
-                                                        } else {
-                                                            break;
-                                                        }
-                                                    }
-
-                                                    if let Some(row_data) = global_data.state.data.get(editing_idx) {
-                                                        if let Some(id_value) = row_data.get(&op.descriptor.id_column) {
-                                                            if let Some(id_str) = id_value.as_string() {
-                                                                let new_value = rusty_knowledge::storage::types::Value::String(buffer_content);
-                                                                let op_signal = AppSignal::ExecuteOperation {
-                                                                    operation_name: op.descriptor.name.clone(),
-                                                                    table: op.descriptor.table.clone(),
-                                                                    id_column: op.descriptor.id_column.clone(),
-                                                                    id_value: id_str.to_string(),
-                                                                    field: get_field_name(op),
-                                                                    new_value,
-                                                                };
-                                                                send_signal!(
-                                                                    global_data.main_thread_channel_sender,
-                                                                    TerminalWindowMainThreadSignal::ApplyAppSignal(op_signal)
-                                                                );
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
+                                save_current_block_without_exit(self, global_data, editing_idx);
                             }
                         }
                         // Now start editing the selected block
                         return self.start_editing_selected_block(global_data);
+                    } else {
+                        // Selected block doesn't have editable_text - exit edit mode if we were editing
+                        if global_data.state.editing_block_index.is_some() {
+                            let editing_idx = global_data.state.editing_block_index.unwrap();
+                            save_current_block_without_exit(self, global_data, editing_idx);
+                            exit_edit_mode(self, global_data);
+                        }
                     }
                 }
             }
@@ -416,101 +489,19 @@ impl Component<State, AppSignal> for BlockListComponent {
                     // Handle edit mode first - use EditorEngine to process input
                     if let Some(_editing_idx) = global_data.state.editing_block_index {
                         if let Some(buffer) = &mut global_data.state.editing_buffer {
-                            // Get or create editor engine (reuse across events)
-                            // Note: Editor engine should already exist from Enter handler, but create if missing
-                            if self.editor_engine.is_none() {
-                                self.editor_engine = Some(EditorEngine::new(EditorEngineConfig {
-                                    multiline_mode: r3bl_tui::LineMode::MultiLine,
-                                    syntax_highlight: r3bl_tui::SyntaxHighlightMode::Disable,
-                                    edit_mode: r3bl_tui::EditMode::ReadWrite,
-                                }));
-                            }
-
-                            let editor_engine = self.editor_engine.as_mut().unwrap();
-
-                            // CRITICAL: Set viewport on EditorEngine before processing events
-                            // Operations like buffer.get_mut(engine.viewport()) require a valid viewport
-                            // Use a reasonable default if not set (80 cols is standard terminal width)
-                            if editor_engine.viewport() == Size::default() {
-                                editor_engine.current_box.style_adjusted_bounds_size = width(200) + height(50);
-                            }
+                            let editor_engine = ensure_editor_engine(self);
 
                             // Handle Esc: save and exit edit mode (check BEFORE passing to EditorEngine)
                             if let Key::SpecialKey(SpecialKey::Esc) = key {
                                 // Escape: save and exit edit mode
                                 global_data.state.status_message = "Esc - saving and exiting".to_string();
-
-                                // Extract operation info and save
-                                let operation_info = if let Some(element) = self.element_tree.get(global_data.state.editing_block_index.unwrap()) {
-                                    element.find_editable_text()
-                                        .and_then(|editable| {
-                                            if let UIElement::EditableText { operations, .. } = editable {
-                                                operations.first().map(|op| (
-                                                    op.descriptor.name.clone(),
-                                                    op.descriptor.table.clone(),
-                                                    op.descriptor.id_column.clone(),
-                                                    get_field_name(op),
-                                                ))
-                                            } else {
-                                                None
-                                            }
-                                        })
-                                } else {
-                                    None
-                                };
-
-                                // Get content from buffer - join all lines with \n
-                                let lines = buffer.get_lines();
-                                let mut buffer_content = String::new();
-                                let mut i = 0;
-                                loop {
-                                    if let Some(line) = lines.get_line_content(row(i)) {
-                                        if !buffer_content.is_empty() {
-                                            buffer_content.push('\n');
-                                        }
-                                        buffer_content.push_str(line);
-                                        i += 1;
-                                    } else {
-                                        break;
-                                    }
-                                }
-
-                                // Exit edit mode and clear buffer first (release mutable borrow)
                                 let editing_idx = global_data.state.editing_block_index.unwrap();
-                                global_data.state.editing_block_index = None;
-                                global_data.state.editing_buffer = None;
-                                // Clear editor engine when exiting edit mode
-                                self.editor_engine = None;
-
-                                // Now we can borrow state.data immutably
-                                if let Some((operation_name, table, id_column, field)) = operation_info {
-                                    if let Some(row_data) = global_data.state.data.get(editing_idx) {
-                                        if let Some(id_value) = row_data.get(&id_column) {
-                                            if let Some(id_str) = id_value.as_string() {
-                                                let new_value = rusty_knowledge::storage::types::Value::String(buffer_content);
-                                                let op_signal = AppSignal::ExecuteOperation {
-                                                    operation_name: operation_name.clone(),
-                                                    table,
-                                                    id_column,
-                                                    id_value: id_str.to_string(),
-                                                    field,
-                                                    new_value,
-                                                };
-                                                send_signal!(
-                                                    global_data.main_thread_channel_sender,
-                                                    TerminalWindowMainThreadSignal::ApplyAppSignal(op_signal)
-                                                );
-                                                global_data.state.status_message = "Saving...".to_string();
-                                            }
-                                        }
-                                    }
-                                }
+                                save_and_exit_edit_mode(self, global_data, editing_idx);
                                 return Ok(EventPropagation::ConsumedRender);
                             }
 
                             // Handle Up/Down arrows: check if at boundary, otherwise let EditorEngine handle
                             if let Key::SpecialKey(SpecialKey::Up) = key {
-                                let lines = buffer.get_lines();
                                 let caret_raw = buffer.get_caret_raw();
                                 let caret_row = caret_raw.row_index.as_usize();
 
@@ -518,53 +509,8 @@ impl Component<State, AppSignal> for BlockListComponent {
                                 if caret_row == 0 {
                                     // At first line: save current block and move to previous
                                     let editing_idx = global_data.state.editing_block_index.unwrap();
-                                    if let Some(element) = self.element_tree.get(editing_idx) {
-                                        if let Some(editable_text) = element.find_editable_text() {
-                                            if let UIElement::EditableText { operations, .. } = editable_text {
-                                                if let Some(op) = operations.first() {
-                                                    let mut buffer_content = String::new();
-                                                    let mut i = 0;
-                                                    loop {
-                                                        if let Some(line) = lines.get_line_content(row(i)) {
-                                                            if !buffer_content.is_empty() {
-                                                                buffer_content.push('\n');
-                                                            }
-                                                            buffer_content.push_str(line);
-                                                            i += 1;
-                                                        } else {
-                                                            break;
-                                                        }
-                                                    }
-
-                                                    if let Some(row_data) = global_data.state.data.get(editing_idx) {
-                                                        if let Some(id_value) = row_data.get(&op.descriptor.id_column) {
-                                                            if let Some(id_str) = id_value.as_string() {
-                                                                let new_value = rusty_knowledge::storage::types::Value::String(buffer_content);
-                                                                let op_signal = AppSignal::ExecuteOperation {
-                                                                    operation_name: op.descriptor.name.clone(),
-                                                                    table: op.descriptor.table.clone(),
-                                                                    id_column: op.descriptor.id_column.clone(),
-                                                                    id_value: id_str.to_string(),
-                                                                    field: get_field_name(op),
-                                                                    new_value,
-                                                                };
-                                                                send_signal!(
-                                                                    global_data.main_thread_channel_sender,
-                                                                    TerminalWindowMainThreadSignal::ApplyAppSignal(op_signal)
-                                                                );
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    // Exit edit mode and move to previous
-                                    global_data.state.editing_block_index = None;
-                                    global_data.state.editing_buffer = None;
-                                    self.editor_engine = None;
-
+                                    save_current_block_without_exit(self, global_data, editing_idx);
+                                    exit_edit_mode(self, global_data);
                                     global_data.state.select_previous();
                                     // Start editing the new block
                                     return self.start_editing_selected_block(global_data);
@@ -594,53 +540,8 @@ impl Component<State, AppSignal> for BlockListComponent {
                                 if is_last_line {
                                     // At last line: save current block and move to next
                                     let editing_idx = global_data.state.editing_block_index.unwrap();
-                                    if let Some(element) = self.element_tree.get(editing_idx) {
-                                        if let Some(editable_text) = element.find_editable_text() {
-                                            if let UIElement::EditableText { operations, .. } = editable_text {
-                                                if let Some(op) = operations.first() {
-                                                    let mut buffer_content = String::new();
-                                                    let mut i = 0;
-                                                    loop {
-                                                        if let Some(line) = lines.get_line_content(row(i)) {
-                                                            if !buffer_content.is_empty() {
-                                                                buffer_content.push('\n');
-                                                            }
-                                                            buffer_content.push_str(line);
-                                                            i += 1;
-                                                        } else {
-                                                            break;
-                                                        }
-                                                    }
-
-                                                    if let Some(row_data) = global_data.state.data.get(editing_idx) {
-                                                        if let Some(id_value) = row_data.get(&op.descriptor.id_column) {
-                                                            if let Some(id_str) = id_value.as_string() {
-                                                                let new_value = rusty_knowledge::storage::types::Value::String(buffer_content);
-                                                                let op_signal = AppSignal::ExecuteOperation {
-                                                                    operation_name: op.descriptor.name.clone(),
-                                                                    table: op.descriptor.table.clone(),
-                                                                    id_column: op.descriptor.id_column.clone(),
-                                                                    id_value: id_str.to_string(),
-                                                                    field: get_field_name(op),
-                                                                    new_value,
-                                                                };
-                                                                send_signal!(
-                                                                    global_data.main_thread_channel_sender,
-                                                                    TerminalWindowMainThreadSignal::ApplyAppSignal(op_signal)
-                                                                );
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    // Exit edit mode and move to next
-                                    global_data.state.editing_block_index = None;
-                                    global_data.state.editing_buffer = None;
-                                    self.editor_engine = None;
-
+                                    save_current_block_without_exit(self, global_data, editing_idx);
+                                    exit_edit_mode(self, global_data);
                                     global_data.state.select_next();
                                     // Start editing the new block
                                     return self.start_editing_selected_block(global_data);
@@ -688,11 +589,7 @@ impl Component<State, AppSignal> for BlockListComponent {
                     if let Key::Character(typed_char) = key {
                         // Check keybindings config first
                         let context = self.get_current_context(global_data);
-                        let empty_mask = r3bl_tui::ModifierKeysMask {
-                            ctrl_key_state: KeyState::NotPressed,
-                            shift_key_state: KeyState::NotPressed,
-                            alt_key_state: KeyState::NotPressed,
-                        };
+                        let empty_mask = empty_modifier_mask();
 
                         if let Some(action) = global_data.state.keybindings.find_binding(
                             &Key::Character(typed_char),
@@ -706,87 +603,14 @@ impl Component<State, AppSignal> for BlockListComponent {
 
                         // No binding found - fall back to default behavior
                         match typed_char {
-                            'x' => {
-                                // 'x': toggle completed state (only when NOT editing)
-                                if global_data.state.editing_block_index.is_none() {
-                                    event_consumed = true;
-                                    // Execute operation via signal system (toggle completed state)
-                                    if global_data.state.selected_index < self.element_tree.len() {
-                                        let element = &self.element_tree[global_data.state.selected_index];
-
-                                        if let Some(operation) = element.get_operation() {
-                                            // Get current data row and clone necessary data
-                                            let operation_to_send = if let Some(row) = global_data.state.data.get(global_data.state.selected_index) {
-                                                if let Some(id_value) = row.get(&operation.descriptor.id_column) {
-                                                    if let Some(id_str) = id_value.as_string() {
-                                                        // Get current field value and toggle it
-                                                        // Handle both Boolean and Integer (SQLite stores booleans as 0/1)
-                                                        if let Some(field_value) = row.get(&get_field_name(operation)) {
-                                                            let bool_val = match field_value {
-                                                                rusty_knowledge::storage::types::Value::Boolean(b) => *b,
-                                                                rusty_knowledge::storage::types::Value::Integer(i) => *i != 0,
-                                                                _ => {
-                                                                    global_data.state.status_message = format!("Field {} is not a boolean or integer", get_field_name(operation));
-                                                                    return Ok(EventPropagation::ConsumedRender);
-                                                                }
-                                                            };
-                                                            Some(AppSignal::ExecuteOperation {
-                                                                operation_name: operation.descriptor.name.clone(),
-                                                                table: operation.descriptor.table.clone(),
-                                                                id_column: operation.descriptor.id_column.clone(),
-                                                                id_value: id_str.to_string(),
-                                                                field: get_field_name(operation),
-                                                                new_value: rusty_knowledge::storage::types::Value::Boolean(!bool_val),
-                                                            })
-                                                        } else {
-                                                                    global_data.state.status_message = format!("Field {} not found in row", get_field_name(operation));
-                                                            None
-                                                        }
-                                                    } else {
-                                                                    global_data.state.status_message = format!("ID column {} is not a string", operation.descriptor.id_column);
-                                                        None
-                                                    }
-                                                } else {
-                                                                global_data.state.status_message = format!("ID column {} not found", operation.descriptor.id_column);
-                                                    None
-                                                }
-                                            } else {
-                                                global_data.state.status_message = format!("No data at index {}", global_data.state.selected_index);
-                                                None
-                                            };
-
-                                            // Send signal if we have an operation
-                                            if let Some(op_signal) = operation_to_send {
-                                                send_signal!(
-                                                    global_data.main_thread_channel_sender,
-                                                    TerminalWindowMainThreadSignal::ApplyAppSignal(op_signal)
-                                                );
-                                                global_data.state.status_message = "Executing operation...".to_string();
-                                            } else {
-                                                // Operation found but couldn't build signal - error message already set above
-                                            }
-                                        } else {
-                                            global_data.state.status_message = format!("No operation found for element at index {}", global_data.state.selected_index);
-                                        }
-                                    } else {
-                                        global_data.state.status_message = format!("Selected index {} out of bounds (len: {})", global_data.state.selected_index, self.element_tree.len());
-                                    }
-                                }
-                                // If editing, 'x' is passed through to EditorEngine (inserts 'x' character)
-                            }
+                            // 'x' is now handled via keybindings (Ctrl+x), so removed from fallback
                             ']' => {
                                 event_consumed = true;
-                                match global_data.state.execute_operation_on_selected("indent", None) {
-                                    Ok(_) => global_data.state.status_message = "Indenting...".to_string(),
-                                    Err(e) => global_data.state.status_message = format!("Indent failed: {}", e),
-                                }
+                                execute_operation_with_status(global_data, "indent", "Indenting...", None);
                             }
                             '[' => {
                                 event_consumed = true;
-                                match global_data.state.execute_operation_on_selected("outdent", None) {
-                                    Ok(_) => global_data.state.status_message = "Outdenting...".to_string(),
-                                    Err(e) => global_data.state.status_message = format!("Outdent failed: {}", e),
-                                }
+                                execute_operation_with_status(global_data, "outdent", "Outdenting...", None);
                             }
                             _ => {}
                         }
@@ -795,11 +619,7 @@ impl Component<State, AppSignal> for BlockListComponent {
                     if let Key::SpecialKey(special_key) = key {
                         // Check keybindings config first
                         let context = self.get_current_context(global_data);
-                        let empty_mask = r3bl_tui::ModifierKeysMask {
-                            ctrl_key_state: KeyState::NotPressed,
-                            shift_key_state: KeyState::NotPressed,
-                            alt_key_state: KeyState::NotPressed,
-                        };
+                        let empty_mask = empty_modifier_mask();
 
                         if let Some(action) = global_data.state.keybindings.find_binding(
                             &Key::SpecialKey(special_key),
@@ -814,14 +634,30 @@ impl Component<State, AppSignal> for BlockListComponent {
                         // No binding found - fall back to default behavior
                         match special_key {
                             SpecialKey::Up => {
-                                // Not editing (editing case handled earlier): move selection and start editing
+                                // Not editing (editing case handled earlier): move selection
                                 global_data.state.select_previous();
-                                return self.start_editing_selected_block(global_data);
+                                // Only try to start editing if the selected block has editable_text
+                                if global_data.state.selected_index < self.element_tree.len() {
+                                    let element = &self.element_tree[global_data.state.selected_index];
+                                    if element.find_editable_text().is_some() {
+                                        return self.start_editing_selected_block(global_data);
+                                    }
+                                }
+                                // No editable_text - just consume and render to show new selection
+                                return Ok(EventPropagation::ConsumedRender);
                             }
                             SpecialKey::Down => {
-                                // Not editing (editing case handled earlier): move selection and start editing
+                                // Not editing (editing case handled earlier): move selection
                                 global_data.state.select_next();
-                                return self.start_editing_selected_block(global_data);
+                                // Only try to start editing if the selected block has editable_text
+                                if global_data.state.selected_index < self.element_tree.len() {
+                                    let element = &self.element_tree[global_data.state.selected_index];
+                                    if element.find_editable_text().is_some() {
+                                        return self.start_editing_selected_block(global_data);
+                                    }
+                                }
+                                // No editable_text - just consume and render to show new selection
+                                return Ok(EventPropagation::ConsumedRender);
                             }
                             SpecialKey::Enter => {
                                 // Enter: start editing if editable_text is selected
@@ -831,10 +667,7 @@ impl Component<State, AppSignal> for BlockListComponent {
                             }
                             SpecialKey::Tab => {
                                 event_consumed = true;
-                                match global_data.state.execute_operation_on_selected("indent", None) {
-                                    Ok(_) => global_data.state.status_message = "Indenting...".to_string(),
-                                    Err(e) => global_data.state.status_message = format!("Indent failed: {}", e),
-                                }
+                                execute_operation_with_status(global_data, "indent", "Indenting...", None);
                             }
                             _ => {}
                         }
@@ -863,21 +696,7 @@ impl Component<State, AppSignal> for BlockListComponent {
                     // Handle edit mode first - forward WithModifiers events to EditorEngine
                     if let Some(_editing_idx) = global_data.state.editing_block_index {
                         if let Some(buffer) = &mut global_data.state.editing_buffer {
-                            // Get or create editor engine (reuse across events)
-                            if self.editor_engine.is_none() {
-                                self.editor_engine = Some(EditorEngine::new(EditorEngineConfig {
-                                    multiline_mode: r3bl_tui::LineMode::MultiLine,
-                                    syntax_highlight: r3bl_tui::SyntaxHighlightMode::Disable,
-                                    edit_mode: r3bl_tui::EditMode::ReadWrite,
-                                }));
-                            }
-
-                            let editor_engine = self.editor_engine.as_mut().unwrap();
-
-                            // CRITICAL: Set viewport on EditorEngine before processing events
-                            if editor_engine.viewport() == Size::default() {
-                                editor_engine.current_box.style_adjusted_bounds_size = width(200) + height(50);
-                            }
+                            let editor_engine = ensure_editor_engine(self);
 
                             // Handle Ctrl+Enter: save and exit edit mode
                             // Shift+Enter: insert newline (if terminal supports it as WithModifiers)
@@ -886,106 +705,12 @@ impl Component<State, AppSignal> for BlockListComponent {
                             if let Key::SpecialKey(SpecialKey::Enter) = key {
                                 if mask.alt_key_state == KeyState::Pressed {
                                     // Alt+Enter: split block at cursor
-                                    let cursor_offset = match global_data.state.calculate_cursor_offset() {
-                                        Ok(offset) => offset,
-                                        Err(e) => {
-                                            global_data.state.status_message = format!("Split failed: {}", e);
-                                            return Ok(EventPropagation::ConsumedRender);
-                                        }
-                                    };
-                                    let block_id = match global_data.state.selected_block_id() {
-                                        Some(id) => id,
-                                        None => {
-                                            global_data.state.status_message = "Split failed: No block selected".to_string();
-                                            return Ok(EventPropagation::ConsumedRender);
-                                        }
-                                    };
-                                    let ui_state = rusty_knowledge::api::render_engine::UiState {
-                                        cursor_pos: Some(rusty_knowledge::api::render_engine::CursorPosition {
-                                            block_id: block_id.clone(),
-                                            offset: cursor_offset,
-                                        }),
-                                        focused_id: Some(block_id),
-                                    };
-                                    match global_data.state.execute_operation_on_selected("split_block", Some(ui_state)) {
-                                        Ok(_) => {
-                                            global_data.state.status_message = "Splitting block...".to_string();
-                                            // Exit edit mode after split
-                                            global_data.state.editing_block_index = None;
-                                            global_data.state.editing_buffer = None;
-                                            self.editor_engine = None;
-                                        }
-                                        Err(e) => global_data.state.status_message = format!("Split failed: {}", e),
-                                    }
-                                    return Ok(EventPropagation::ConsumedRender);
+                                    return handle_split_block(self, global_data);
                                 } else if mask.ctrl_key_state == KeyState::Pressed {
                                     // Ctrl+Enter: save and exit edit mode
                                     global_data.state.status_message = "Ctrl+Enter - saving".to_string();
-                                    // Extract operation info from the EditableText
-                                    let operation_info = if let Some(element) = self.element_tree.get(global_data.state.editing_block_index.unwrap()) {
-                                        element.find_editable_text()
-                                            .and_then(|editable| {
-                                                if let UIElement::EditableText { operations, .. } = editable {
-                                                    operations.first().map(|op| (
-                                                        op.descriptor.name.clone(),
-                                                        op.descriptor.table.clone(),
-                                                        op.descriptor.id_column.clone(),
-                                                        get_field_name(op),
-                                                    ))
-                                                } else {
-                                                    None
-                                                }
-                                            })
-                                    } else {
-                                        None
-                                    };
-
-                                    // Get content from buffer - join all lines with \n
-                                    let lines = buffer.get_lines();
-                                    let mut buffer_content = String::new();
-                                    let mut i = 0;
-                                    loop {
-                                        if let Some(line) = lines.get_line_content(row(i)) {
-                                            if !buffer_content.is_empty() {
-                                                buffer_content.push('\n');
-                                            }
-                                            buffer_content.push_str(line);
-                                            i += 1;
-                                        } else {
-                                            break;
-                                        }
-                                    }
-
-                                    // Exit edit mode and clear buffer first (release mutable borrow)
                                     let editing_idx = global_data.state.editing_block_index.unwrap();
-                                    global_data.state.editing_block_index = None;
-                                    global_data.state.editing_buffer = None;
-                                    // Clear editor engine when exiting edit mode
-                                    self.editor_engine = None;
-
-                                    // Now we can borrow state.data immutably
-                                    if let Some((operation_name, table, id_column, field)) = operation_info {
-                                        if let Some(row_data) = global_data.state.data.get(editing_idx) {
-                                            if let Some(id_value) = row_data.get(&id_column) {
-                                                if let Some(id_str) = id_value.as_string() {
-                                                    let new_value = rusty_knowledge::storage::types::Value::String(buffer_content);
-                                                    let op_signal = AppSignal::ExecuteOperation {
-                                                        operation_name: operation_name.clone(),
-                                                        table,
-                                                        id_column,
-                                                        id_value: id_str.to_string(),
-                                                        field,
-                                                        new_value,
-                                                    };
-                                                    send_signal!(
-                                                        global_data.main_thread_channel_sender,
-                                                        TerminalWindowMainThreadSignal::ApplyAppSignal(op_signal)
-                                                    );
-                                                    global_data.state.status_message = "Saving...".to_string();
-                                                }
-                                            }
-                                        }
-                                    }
+                                    save_and_exit_edit_mode(self, global_data, editing_idx);
                                     return Ok(EventPropagation::ConsumedRender);
                                 } else if mask.shift_key_state == KeyState::Pressed {
                                     // Shift+Enter: manually create InsertNewLine event and apply it
@@ -1002,71 +727,8 @@ impl Component<State, AppSignal> for BlockListComponent {
                                     // Enter without modifiers in WithModifiers: shouldn't happen, but let EditorEngine handle it
                                     global_data.state.status_message = "Enter (WithModifiers but no modifiers) - passing to EditorEngine".to_string();
                                     // Enter without Shift: save and exit edit mode
-                                    // Extract operation info from the EditableText
-                                    let operation_info = if let Some(element) = self.element_tree.get(global_data.state.editing_block_index.unwrap()) {
-                                        element.find_editable_text()
-                                            .and_then(|editable| {
-                                                if let UIElement::EditableText { operations, .. } = editable {
-                                                    operations.first().map(|op| (
-                                                        op.descriptor.name.clone(),
-                                                        op.descriptor.table.clone(),
-                                                        op.descriptor.id_column.clone(),
-                                                        get_field_name(op),
-                                                    ))
-                                                } else {
-                                                    None
-                                                }
-                                            })
-                                    } else {
-                                        None
-                                    };
-
-                                    // Get content from buffer - join all lines with \n
-                                    let lines = buffer.get_lines();
-                                    let mut buffer_content = String::new();
-                                    let mut i = 0;
-                                    loop {
-                                        if let Some(line) = lines.get_line_content(row(i)) {
-                                            if !buffer_content.is_empty() {
-                                                buffer_content.push('\n');
-                                            }
-                                            buffer_content.push_str(line);
-                                            i += 1;
-                                        } else {
-                                            break;
-                                        }
-                                    }
-
-                                    // Exit edit mode and clear buffer first (release mutable borrow)
                                     let editing_idx = global_data.state.editing_block_index.unwrap();
-                                    global_data.state.editing_block_index = None;
-                                    global_data.state.editing_buffer = None;
-                                    // Clear editor engine when exiting edit mode
-                                    self.editor_engine = None;
-
-                                    // Now we can borrow state.data immutably
-                                    if let Some((operation_name, table, id_column, field)) = operation_info {
-                                        if let Some(row_data) = global_data.state.data.get(editing_idx) {
-                                            if let Some(id_value) = row_data.get(&id_column) {
-                                                if let Some(id_str) = id_value.as_string() {
-                                                    let new_value = rusty_knowledge::storage::types::Value::String(buffer_content);
-                                                    let op_signal = AppSignal::ExecuteOperation {
-                                                        operation_name: operation_name.clone(),
-                                                        table,
-                                                        id_column,
-                                                        id_value: id_str.to_string(),
-                                                        field,
-                                                        new_value,
-                                                    };
-                                                    send_signal!(
-                                                        global_data.main_thread_channel_sender,
-                                                        TerminalWindowMainThreadSignal::ApplyAppSignal(op_signal)
-                                                    );
-                                                    global_data.state.status_message = "Saving...".to_string();
-                                                }
-                                            }
-                                        }
-                                    }
+                                    save_and_exit_edit_mode(self, global_data, editing_idx);
                                     return Ok(EventPropagation::ConsumedRender);
                                 }
                             } else {
@@ -1098,38 +760,23 @@ impl Component<State, AppSignal> for BlockListComponent {
                         match special_key {
                             SpecialKey::Tab if mask.shift_key_state == KeyState::Pressed => {
                                 event_consumed = true;
-                                match global_data.state.execute_operation_on_selected("outdent", None) {
-                                    Ok(_) => global_data.state.status_message = "Outdenting...".to_string(),
-                                    Err(e) => global_data.state.status_message = format!("Outdent failed: {}", e),
-                                }
+                                execute_operation_with_status(global_data, "outdent", "Outdenting...", None);
                             }
                             SpecialKey::Up if mask.ctrl_key_state == KeyState::Pressed => {
                                 event_consumed = true;
-                                match global_data.state.execute_operation_on_selected("move_up", None) {
-                                    Ok(_) => global_data.state.status_message = "Moving up...".to_string(),
-                                    Err(e) => global_data.state.status_message = format!("Move up failed: {}", e),
-                                }
+                                execute_operation_with_status(global_data, "move_up", "Moving up...", None);
                             }
                             SpecialKey::Down if mask.ctrl_key_state == KeyState::Pressed => {
                                 event_consumed = true;
-                                match global_data.state.execute_operation_on_selected("move_down", None) {
-                                    Ok(_) => global_data.state.status_message = "Moving down...".to_string(),
-                                    Err(e) => global_data.state.status_message = format!("Move down failed: {}", e),
-                                }
+                                execute_operation_with_status(global_data, "move_down", "Moving down...", None);
                             }
                             SpecialKey::Right if mask.ctrl_key_state == KeyState::Pressed => {
                                 event_consumed = true;
-                                match global_data.state.execute_operation_on_selected("indent", None) {
-                                    Ok(_) => global_data.state.status_message = "Indenting...".to_string(),
-                                    Err(e) => global_data.state.status_message = format!("Indent failed: {}", e),
-                                }
+                                execute_operation_with_status(global_data, "indent", "Indenting...", None);
                             }
                             SpecialKey::Left if mask.ctrl_key_state == KeyState::Pressed => {
                                 event_consumed = true;
-                                match global_data.state.execute_operation_on_selected("outdent", None) {
-                                    Ok(_) => global_data.state.status_message = "Outdenting...".to_string(),
-                                    Err(e) => global_data.state.status_message = format!("Outdent failed: {}", e),
-                                }
+                                execute_operation_with_status(global_data, "outdent", "Outdenting...", None);
                             }
                             _ => {}
                         }

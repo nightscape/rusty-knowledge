@@ -6,109 +6,46 @@ use tokio::sync::RwLock;
 
 use crate::storage::turso::{TursoBackend, RowChangeStream};
 use crate::storage::types::{Value, StorageEntity};
-use crate::operations::OperationRegistry;
 use crate::api::operation_dispatcher::OperationDispatcher;
 use crate::core::datasource::OperationProvider;
 use query_render::RenderSpec;
 
-/// CDC event representing a row change
-/// flutter_rust_bridge:non_opaque
-#[derive(Debug, Clone)]
-pub enum RowEvent {
-    Added { id: String, data: HashMap<String, Value> },
-    Updated { id: String, data: HashMap<String, Value> },
-    Removed { id: String },
-}
-
-/// UI state containing cursor position and focused block
-/// flutter_rust_bridge:non_opaque
-#[derive(Debug, Clone)]
-pub struct UiState {
-    pub cursor_pos: Option<CursorPosition>,
-    pub focused_id: Option<String>,
-}
-
-/// Cursor position within a block
-/// flutter_rust_bridge:non_opaque
-#[derive(Debug, Clone)]
-pub struct CursorPosition {
-    pub block_id: String,
-    pub offset: u32,
-}
-
 /// Main render engine managing database, query compilation, and operations
-pub struct RenderEngine {
+pub struct BackendEngine {
     backend: Arc<RwLock<TursoBackend>>,
-    ui_state: Arc<RwLock<UiState>>,
-    operations: Arc<OperationRegistry>, // Legacy registry (kept for backward compatibility)
-    dispatcher: Arc<RwLock<OperationDispatcher>>, // New trait-based operation dispatcher
+    dispatcher: Arc<OperationDispatcher>, // Operation dispatcher for routing operations
     table_to_entity_map: Arc<RwLock<HashMap<String, String>>>, // Maps table names to entity names
     // CDC connection kept alive for streaming
     // CRITICAL: This must stay alive for CDC callbacks to work
     // The callback closure captures the channel sender, which closes the stream if dropped
-    _cdc_conn: Option<Arc<tokio::sync::Mutex<turso::Connection>>>,
+    // Uses interior mutability so watch_query can take &self
+    _cdc_conn: Arc<tokio::sync::Mutex<Option<Arc<tokio::sync::Mutex<turso::Connection>>>>>,
 }
 
-impl RenderEngine {
-    /// Create a new render engine with a database at the given path
+impl BackendEngine {
+    /// Create BackendEngine from dependencies (for dependency injection)
     ///
-    /// Automatically registers default block operations:
-    /// - UpdateField
-    /// - Indent
-    /// - Outdent
-    /// - MoveBlock
-    pub async fn new(db_path: PathBuf) -> Result<Self> {
-        let backend = TursoBackend::new(db_path).await?;
-        let operations = Self::create_default_registry();
+    /// This constructor allows creating BackendEngine with pre-constructed dependencies,
+    /// useful for dependency injection frameworks.
+    pub fn from_dependencies(
+        backend: Arc<RwLock<TursoBackend>>,
+        dispatcher: Arc<OperationDispatcher>,
+    ) -> Result<Self> {
+
+        // Operations are now provided via OperationProvider implementations
+        // No legacy operations need to be registered
 
         Ok(Self {
-            backend: Arc::new(RwLock::new(backend)),
-            ui_state: Arc::new(RwLock::new(UiState {
-                cursor_pos: None,
-                focused_id: None,
-            })),
-            operations: Arc::new(operations),
-            dispatcher: Arc::new(RwLock::new(OperationDispatcher::new())),
+            backend,
+            dispatcher,
             table_to_entity_map: Arc::new(RwLock::new(HashMap::new())),
-            _cdc_conn: None,
+            _cdc_conn: Arc::new(tokio::sync::Mutex::new(None)),
         })
     }
 
-    /// Create a new in-memory render engine for testing
-    ///
-    /// Automatically registers default block operations.
-    pub async fn new_in_memory() -> Result<Self> {
-        let backend = TursoBackend::new_in_memory().await?;
-        let operations = Self::create_default_registry();
-
-        Ok(Self {
-            backend: Arc::new(RwLock::new(backend)),
-            ui_state: Arc::new(RwLock::new(UiState {
-                cursor_pos: None,
-                focused_id: None,
-            })),
-            operations: Arc::new(operations),
-            dispatcher: Arc::new(RwLock::new(OperationDispatcher::new())),
-            table_to_entity_map: Arc::new(RwLock::new(HashMap::new())),
-            _cdc_conn: None,
-        })
-    }
-    // TODO: Get rid of this, no defaults should be hard-coded
-    /// Create and populate the default operation registry
-    fn create_default_registry() -> OperationRegistry {
-        use crate::operations::block_ops::{UpdateField, SplitBlock};
-        use crate::operations::block_movements::{Indent, Outdent, MoveBlock, MoveUp, MoveDown};
-
-        let mut registry = OperationRegistry::new();
-        registry.register(Arc::new(UpdateField));
-        registry.register(Arc::new(SplitBlock));
-        registry.register(Arc::new(Indent));
-        registry.register(Arc::new(Outdent));
-        registry.register(Arc::new(MoveBlock));
-        registry.register(Arc::new(MoveUp));
-        registry.register(Arc::new(MoveDown));
-        registry
-    }
+    // Legacy operations have been migrated to trait-based operations
+    // set_field, create, delete are available via CrudOperationProvider
+    // Block movement operations are available via MutableBlockDataSource
 
     /// Compile a PRQL query with render() into SQL and UI specification
     ///
@@ -161,7 +98,7 @@ impl RenderEngine {
         table_name: &str,
     ) -> Result<()> {
         match expr {
-            query_render::RenderExpr::FunctionCall { name: _, args, operations } => {
+            query_render::RenderExpr::FunctionCall { name: _, args, operations: _ } => {
                 // Extract available columns from this function call's arguments
                 let _available_args = self.extract_available_columns_from_args(args);
 
@@ -273,27 +210,15 @@ impl RenderEngine {
             .map_err(|e| anyhow::anyhow!("SQL execution failed: {}", e))
     }
 
-    /// Get current UI state
-    pub async fn get_ui_state(&self) -> UiState {
-        self.ui_state.read().await.clone()
-    }
-
-    /// Update UI state
-    pub async fn set_ui_state(&self, state: UiState) -> Result<()> {
-        let mut ui_state = self.ui_state.write().await;
-        *ui_state = state;
-        Ok(())
-    }
-
     /// Watch a query for changes via CDC streaming
     ///
     /// Returns a stream of RowChange events from the underlying database.
-    /// The CDC connection is stored in the RenderEngine to keep it alive.
+    /// The CDC connection is stored in the BackendEngine to keep it alive.
     ///
     /// Note: Currently returns changes from all tables. Full implementation in Phase 1.3
     /// will create materialized views from SQL queries and filter changes appropriately.
     pub async fn watch_query(
-        &mut self,
+        &self,
         sql: String,
         _params: HashMap<String, Value>,
     ) -> Result<RowChangeStream> {
@@ -342,7 +267,8 @@ impl RenderEngine {
         // Store the connection to keep it alive for CDC callbacks
         // CRITICAL: The connection MUST stay alive for the callback closure to stay alive
         // The callback closure captures the channel sender (tx), which closes the stream if dropped
-        self._cdc_conn = Some(Arc::new(tokio::sync::Mutex::new(cdc_conn)));
+        let mut cdc_conn_guard = self._cdc_conn.lock().await;
+        *cdc_conn_guard = Some(Arc::new(tokio::sync::Mutex::new(cdc_conn)));
 
         Ok(stream)
     }
@@ -358,7 +284,7 @@ impl RenderEngine {
     /// - `Vec<Entity>`: Current query results
     /// - `RowChangeStream`: Stream of ongoing changes to the query results
     pub async fn query_and_watch(
-        &mut self,
+        &self,
         prql: String,
         params: HashMap<String, Value>,
     ) -> Result<(RenderSpec, Vec<StorageEntity>, RowChangeStream)> {
@@ -384,11 +310,11 @@ impl RenderEngine {
     /// # Example
     /// ```no_run
     /// use std::collections::HashMap;
-    /// use rusty_knowledge::api::render_engine::RenderEngine;
+    /// use rusty_knowledge::api::backend_engine::BackendEngine;
     /// use rusty_knowledge::storage::types::Value;
     ///
     /// # async fn example() -> anyhow::Result<()> {
-    /// let engine = RenderEngine::new_in_memory().await?;
+    /// let engine = BackendEngine::new_in_memory().await?;
     ///
     /// let mut params = HashMap::new();
     /// params.insert("id".to_string(), Value::String("block-1".to_string()));
@@ -399,53 +325,51 @@ impl RenderEngine {
     /// ```
     pub async fn execute_operation(
         &self,
+        entity_name: &str,
         op_name: &str,
         params: StorageEntity,
     ) -> Result<()> {
-        let mut backend = self.backend.write().await;
-        let ui_state = self.ui_state.read().await.clone();
-
-        self.operations
-            .execute(op_name, &params, &ui_state, &mut *backend)
+        // Execute via dispatcher using entity_name
+        self.dispatcher
+            .execute_operation(entity_name, op_name, params)
             .await
-            .map_err(|e| anyhow::anyhow!("Operation '{}' failed: {}", op_name, e))
+            .map_err(|e| anyhow::anyhow!("Operation '{}' on entity '{}' failed: {}", op_name, entity_name, e))
     }
 
-    /// Register a custom operation
+    /// Register a custom OperationProvider
     ///
-    /// This allows registering additional operations beyond the defaults.
-    /// Can only be called before the RenderEngine is shared via Arc.
+    /// This allows registering additional operation providers for entity types.
+    /// Operations are automatically discovered via the OperationProvider trait.
     ///
     /// # Example
     /// ```no_run
     /// use std::sync::Arc;
-    /// use rusty_knowledge::api::render_engine::RenderEngine;
-    /// use rusty_knowledge::operations::block_ops::UpdateField;
+    /// use rusty_knowledge::api::backend_engine::BackendEngine;
+    /// use rusty_knowledge::core::datasource::OperationProvider;
     ///
     /// # async fn example() -> anyhow::Result<()> {
-    /// let mut engine = RenderEngine::new_in_memory().await?;
+    /// let engine = BackendEngine::new_in_memory().await?;
     ///
-    /// // Register custom operation before sharing
-    /// engine.register_operation(Arc::new(UpdateField))?;
+    /// // Register custom provider
+    /// // engine.register_provider("my-entity", my_provider).await?;
     /// # Ok(())
     /// # }
     /// ```
-    pub fn register_operation(&mut self, operation: Arc<dyn crate::operations::Operation>) -> Result<()> {
-        Arc::get_mut(&mut self.operations)
-            .ok_or_else(|| anyhow::anyhow!("Cannot register operations after RenderEngine is shared"))?
-            .register(operation);
-        Ok(())
-    }
 
-    pub fn available_operations(&self) -> Vec<String> {
-        self.operations.operation_names()
+    pub async fn available_operations(&self, entity_name: &str) -> Vec<String> {
+        self.dispatcher
+            .operations()
             .into_iter()
-            .map(|s| s.to_string())
+            .filter(|op| op.entity_name == entity_name)
+            .map(|op| op.name)
             .collect()
     }
 
-    pub fn has_operation(&self, op_name: &str) -> bool {
-        self.operations.has_operation(op_name)
+    pub async fn has_operation(&self, entity_name: &str, op_name: &str) -> bool {
+        self.dispatcher
+            .operations()
+            .into_iter()
+            .any(|op| op.entity_name == entity_name && op.name == op_name)
     }
 
     /// Execute a closure with read access to the backend
@@ -473,50 +397,6 @@ impl RenderEngine {
         f(&mut *backend)
     }
 
-    /// Register an OperationProvider for an entity type
-    ///
-    /// This registers a provider (typically a QueryableCache<T>) with the dispatcher.
-    /// The provider will handle operations for the specified entity_name.
-    ///
-    /// # Arguments
-    /// * `entity_name` - Entity identifier (e.g., "todoist-task", "logseq-block")
-    /// * `provider` - The OperationProvider instance to register
-    ///
-    /// # Example
-    /// ```no_run
-    /// use std::sync::Arc;
-    /// use rusty_knowledge::api::render_engine::RenderEngine;
-    /// use rusty_knowledge::api::operation_dispatcher::OperationDispatcher;
-    /// use rusty_knowledge::core::datasource::OperationProvider;
-    ///
-    /// # async fn example() -> anyhow::Result<()> {
-    /// let engine = RenderEngine::new_in_memory().await?;
-    /// // ... create provider ...
-    /// // engine.register_provider("todoist-task".to_string(), provider).await?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn register_provider(
-        &self,
-        entity_name: String,
-        provider: Arc<dyn OperationProvider>,
-    ) -> Result<()> {
-        let mut dispatcher = self.dispatcher.write().await;
-        dispatcher.register(entity_name.clone(), provider);
-        Ok(())
-    }
-
-    /// Unregister an OperationProvider for an entity type
-    ///
-    /// # Arguments
-    /// * `entity_name` - Entity identifier to unregister
-    ///
-    /// # Returns
-    /// `true` if a provider was removed, `false` if no provider was registered
-    pub async fn unregister_provider(&self, entity_name: &str) -> bool {
-        let mut dispatcher = self.dispatcher.write().await;
-        dispatcher.unregister(entity_name)
-    }
 
     /// Map a table name to an entity name
     ///
@@ -543,11 +423,11 @@ impl RenderEngine {
         map.get(table_name).cloned()
     }
 
-    /// Get a read-only reference to the operation dispatcher
+    /// Get a clone of the operation dispatcher Arc
     ///
     /// This allows querying available operations without mutating the dispatcher.
-    pub async fn get_dispatcher(&self) -> tokio::sync::RwLockReadGuard<'_, OperationDispatcher> {
-        self.dispatcher.read().await
+    pub fn get_dispatcher(&self) -> Arc<OperationDispatcher> {
+        self.dispatcher.clone()
     }
 
     /// Get a clone of the backend Arc
@@ -557,25 +437,80 @@ impl RenderEngine {
         self.backend.clone()
     }
 
-    /// Register a syncable provider (delegates to dispatcher)
+    /// Initialize database schema and sample data if the database doesn't exist
     ///
-    /// # Arguments
-    /// * `provider_name` - Provider identifier (e.g., "todoist", "jira")
-    /// * `provider` - The SyncableProvider instance to register
-    pub async fn register_syncable_provider(
-        &self,
-        provider_name: String,
-        provider: Arc<tokio::sync::Mutex<dyn crate::core::datasource::SyncableProvider>>,
-    ) {
-        let mut dispatcher = self.dispatcher.write().await;
-        dispatcher.register_syncable_provider(provider_name, provider);
+    /// This creates the blocks table and inserts sample data for new databases.
+    /// Should be called after creating the BackendEngine for a new database.
+    pub async fn initialize_database_if_needed(&self, db_path: &PathBuf) -> Result<()> {
+        let db_exists = db_path.exists();
+
+        if !db_exists {
+            // Create blocks table schema
+            let create_table_sql = r#"
+                CREATE TABLE IF NOT EXISTS blocks (
+                    id TEXT PRIMARY KEY,
+                    parent_id TEXT,
+                    depth INTEGER NOT NULL DEFAULT 0,
+                    sort_key TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    collapsed INTEGER NOT NULL DEFAULT 0,
+                    completed INTEGER NOT NULL DEFAULT 0,
+                    block_type TEXT NOT NULL DEFAULT 'text',
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )
+            "#;
+
+            self.execute_query(create_table_sql.to_string(), HashMap::new())
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to create blocks table: {}", e))?;
+
+            // Generate proper fractional index keys for sample data
+            use crate::storage::fractional_index::gen_key_between;
+
+            let root_1_key = gen_key_between(None, None)
+                .map_err(|e| anyhow::anyhow!("Failed to generate root-1 key: {}", e))?;
+            let root_2_key = gen_key_between(Some(&root_1_key), None)
+                .map_err(|e| anyhow::anyhow!("Failed to generate root-2 key: {}", e))?;
+
+            let child_1_key = gen_key_between(None, None)
+                .map_err(|e| anyhow::anyhow!("Failed to generate child-1 key: {}", e))?;
+            let child_2_key = gen_key_between(Some(&child_1_key), None)
+                .map_err(|e| anyhow::anyhow!("Failed to generate child-2 key: {}", e))?;
+
+            let grandchild_1_key = gen_key_between(None, None)
+                .map_err(|e| anyhow::anyhow!("Failed to generate grandchild-1 key: {}", e))?;
+
+            // Insert sample data for testing with fractional indexing sort_keys
+            let sample_data_sql = format!(r#"
+                INSERT OR IGNORE INTO blocks (id, parent_id, depth, sort_key, content, block_type, completed)
+                VALUES
+                    ('root-1', NULL, 0, '{}', 'Welcome to Block Outliner', 'heading', 0),
+                    ('child-1', 'root-1', 1, '{}', 'This is a child block', 'text', 0),
+                    ('child-2', 'root-1', 1, '{}', 'Another child block', 'text', 1),
+                    ('grandchild-1', 'child-1', 2, '{}', 'A nested grandchild', 'text', 0),
+                    ('root-2', NULL, 0, '{}', 'Second top-level block', 'heading', 0)
+            "#, root_1_key, child_1_key, child_2_key, grandchild_1_key, root_2_key);
+
+            self.execute_query(sample_data_sql.to_string(), HashMap::new())
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to insert sample data: {}", e))?;
+        }
+
+        Ok(())
     }
+
 
     /// Sync all registered providers (delegates to dispatcher)
     pub async fn sync_all_providers(&self) -> Result<()> {
-        let dispatcher = self.dispatcher.read().await;
-        dispatcher.sync_all_providers().await
-            .map_err(|e| anyhow::anyhow!("Failed to sync providers: {}", e))
+        use tracing::info;
+        info!("[BackendEngine] sync_all_providers() called");
+        self.dispatcher.sync_all_providers().await
+            .map_err(|e| {
+                use tracing::error;
+                error!("[BackendEngine] sync_all_providers() failed: {}", e);
+                anyhow::anyhow!("Failed to sync providers: {}", e)
+            })
     }
 
     /// Sync a specific provider (delegates to dispatcher)
@@ -583,9 +518,10 @@ impl RenderEngine {
     /// # Arguments
     /// * `provider_name` - Provider identifier (e.g., "todoist")
     pub async fn sync_provider(&self, provider_name: &str) -> Result<()> {
-        let dispatcher = self.dispatcher.read().await;
-        dispatcher.sync_provider(provider_name).await
-            .map_err(|e| anyhow::anyhow!("Failed to sync provider {}: {}", provider_name, e))
+        let _new_token = self.dispatcher.sync_provider(provider_name).await
+            .map_err(|e| anyhow::anyhow!("Failed to sync provider {}: {}", provider_name, e))?;
+        // TODO: Persist the new_token to database/file
+        Ok(())
     }
 
 }
@@ -593,17 +529,136 @@ impl RenderEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::di::test_helpers::{create_test_engine, create_test_engine_with_providers};
+    use crate::core::datasource::{OperationProvider, Result as DatasourceResult};
+    use crate::core::datasource::crud_operation_provider_operations;
+    use query_render::OperationDescriptor;
     use std::sync::Arc;
+    use async_trait::async_trait;
+
+    // Simple SQL-based provider for testing
+    struct SqlOperationProvider {
+        backend: Arc<RwLock<TursoBackend>>,
+        table_name: String,
+        entity_name: String,
+    }
+
+    impl SqlOperationProvider {
+        fn new(backend: Arc<RwLock<TursoBackend>>, table_name: String, entity_name: String) -> Self {
+            Self {
+                backend,
+                table_name,
+                entity_name,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl OperationProvider for SqlOperationProvider {
+        fn operations(&self) -> Vec<OperationDescriptor> {
+            crud_operation_provider_operations(&self.entity_name, &self.table_name, "id")
+        }
+
+        async fn execute_operation(
+            &self,
+            entity_name: &str,
+            op_name: &str,
+            params: StorageEntity,
+        ) -> DatasourceResult<()> {
+            if entity_name != self.entity_name {
+                return Err(format!("Expected entity_name '{}', got '{}'", self.entity_name, entity_name).into());
+            }
+
+            match op_name {
+                "set_field" => {
+                    let id = params.get("id")
+                        .and_then(|v| v.as_string())
+                        .ok_or_else(|| "Missing 'id' parameter".to_string())?;
+                    let field = params.get("field")
+                        .and_then(|v| v.as_string())
+                        .ok_or_else(|| "Missing 'field' parameter".to_string())?;
+                    let value = params.get("value")
+                        .ok_or_else(|| "Missing 'value' parameter".to_string())?;
+
+                    let backend = self.backend.write().await;
+                    let conn = backend.get_connection()
+                        .map_err(|e| format!("Failed to get connection: {}", e))?;
+
+                    // Convert value to SQL
+                    let sql_value = match value {
+                        Value::String(s) => format!("'{}'", s.replace("'", "''")),
+                        Value::Integer(i) => i.to_string(),
+                        Value::Boolean(b) => if *b { "1" } else { "0" }.to_string(),
+                        Value::Null => "NULL".to_string(),
+                        Value::DateTime(dt) => format!("'{}'", dt.to_rfc3339()),
+                        Value::Json(j) => format!("'{}'", serde_json::to_string(j).unwrap_or_default().replace("'", "''")),
+                        Value::Reference(r) => format!("'{}'", r.replace("'", "''")),
+                    };
+
+                    let sql = format!("UPDATE {} SET {} = {} WHERE id = '{}'",
+                        self.table_name, field, sql_value, id.replace("'", "''"));
+                    conn.execute(&sql, ()).await
+                        .map_err(|e| format!("Failed to execute SQL: {}", e))?;
+                    Ok(())
+                }
+                "create" => {
+                    let backend = self.backend.write().await;
+                    let conn = backend.get_connection()
+                        .map_err(|e| format!("Failed to get connection: {}", e))?;
+
+                    let mut columns = Vec::new();
+                    let mut values = Vec::new();
+                    for (key, value) in params.iter() {
+                        columns.push(key.clone());
+                        let sql_value = match value {
+                            Value::String(s) => format!("'{}'", s.replace("'", "''")),
+                            Value::Integer(i) => i.to_string(),
+                            Value::Boolean(b) => if *b { "1" } else { "0" }.to_string(),
+                            Value::Null => "NULL".to_string(),
+                            Value::DateTime(dt) => format!("'{}'", dt.to_rfc3339()),
+                            Value::Json(j) => format!("'{}'", serde_json::to_string(j).unwrap_or_default().replace("'", "''")),
+                            Value::Reference(r) => format!("'{}'", r.replace("'", "''")),
+                        };
+                        values.push(sql_value);
+                    }
+
+                    let sql = format!("INSERT INTO {} ({}) VALUES ({})",
+                        self.table_name,
+                        columns.join(", "),
+                        values.join(", "));
+                    conn.execute(&sql, ()).await
+                        .map_err(|e| format!("Failed to execute SQL: {}", e))?;
+                    Ok(())
+                }
+                "delete" => {
+                    let id = params.get("id")
+                        .and_then(|v| v.as_string())
+                        .ok_or_else(|| "Missing 'id' parameter".to_string())?;
+
+                    let backend = self.backend.write().await;
+                    let conn = backend.get_connection()
+                        .map_err(|e| format!("Failed to get connection: {}", e))?;
+
+                    let sql = format!("DELETE FROM {} WHERE id = '{}'",
+                        self.table_name, id.replace("'", "''"));
+                    conn.execute(&sql, ()).await
+                        .map_err(|e| format!("Failed to execute SQL: {}", e))?;
+                    Ok(())
+                }
+                _ => Err(format!("Unknown operation: {}", op_name).into()),
+            }
+        }
+    }
 
     #[tokio::test]
     async fn test_render_engine_creation() {
-        let engine = RenderEngine::new_in_memory().await;
+        let engine = create_test_engine().await;
         assert!(engine.is_ok());
     }
 
     #[tokio::test]
     async fn test_compile_simple_query() {
-        let engine = RenderEngine::new_in_memory().await.unwrap();
+        let engine = create_test_engine().await.unwrap();
 
         let prql = r#"
             from blocks
@@ -623,28 +678,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_ui_state_management() {
-        let engine = RenderEngine::new_in_memory().await.unwrap();
-
-        let state = UiState {
-            cursor_pos: Some(CursorPosition {
-                block_id: "block-1".to_string(),
-                offset: 42,
-            }),
-            focused_id: Some("block-1".to_string()),
-        };
-
-        engine.set_ui_state(state.clone()).await.unwrap();
-        let retrieved = engine.get_ui_state().await;
-
-        assert_eq!(retrieved.focused_id, state.focused_id);
-        assert!(retrieved.cursor_pos.is_some());
-        assert_eq!(retrieved.cursor_pos.unwrap().offset, 42);
-    }
-
-    #[tokio::test]
     async fn test_execute_query_with_parameters() {
-        let engine = RenderEngine::new_in_memory().await.unwrap();
+        let engine = create_test_engine().await.unwrap();
         let backend = engine.backend.write().await;
 
         // Create a test table
@@ -681,7 +716,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_parameter_binding() {
-        let engine = RenderEngine::new_in_memory().await.unwrap();
+        let engine = create_test_engine().await.unwrap();
         let backend = engine.backend.write().await;
 
         let conn = backend.get_connection().unwrap();
@@ -712,32 +747,41 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_operation() {
-        let engine = RenderEngine::new_in_memory().await.unwrap();
-        let backend = engine.backend.write().await;
+        // Create a temporary engine to get the backend for the provider
+        let temp_engine = create_test_engine().await.unwrap();
+        let provider = Arc::new(SqlOperationProvider::new(
+            temp_engine.backend.clone(),
+            "blocks".to_string(),
+            "blocks".to_string(),
+        ));
 
-        // Create test table
-        let conn = backend.get_connection().unwrap();
-        conn.execute(
-            "CREATE TABLE blocks (id TEXT PRIMARY KEY, content TEXT, completed BOOLEAN)",
-            ()
-        ).await.unwrap();
+        // Create engine with SqlOperationProvider registered via TestProviderModule
+        let engine = create_test_engine_with_providers(":memory:".into(), |module| {
+            module.with_operation_provider(provider)
+        }).await.unwrap();
 
-        conn.execute(
-            "INSERT INTO blocks (id, content, completed) VALUES ('block-1', 'Test task', 0)",
-            ()
-        ).await.unwrap();
+        // Create test table (using the engine's backend)
+        {
+            let backend = engine.backend.write().await;
+            let conn = backend.get_connection().unwrap();
+            conn.execute(
+                "CREATE TABLE blocks (id TEXT PRIMARY KEY, content TEXT, completed BOOLEAN)",
+                ()
+            ).await.unwrap();
 
-        drop(conn);
-        drop(backend);
+            conn.execute(
+                "INSERT INTO blocks (id, content, completed) VALUES ('block-1', 'Test task', 0)",
+                ()
+            ).await.unwrap();
+        }
 
         // Execute operation to update completed field
-        // Note: No need to set up registry - it's already initialized in RenderEngine!
         let mut params = HashMap::new();
         params.insert("id".to_string(), Value::String("block-1".to_string()));
         params.insert("field".to_string(), Value::String("completed".to_string()));
         params.insert("value".to_string(), Value::Boolean(true));
 
-        let result = engine.execute_operation("update_field", params).await;
+        let result = engine.execute_operation("blocks", "set_field", params).await;
         assert!(result.is_ok(), "Operation should succeed: {:?}", result);
 
         // Verify the update
@@ -757,11 +801,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_operation_failure() {
-        let engine = RenderEngine::new_in_memory().await.unwrap();
+        let engine = create_test_engine().await.unwrap();
 
         // Try to execute non-existent operation
         let params = HashMap::new();
-        let result = engine.execute_operation("nonexistent", params).await;
+        let result = engine.execute_operation("blocks", "nonexistent", params).await;
 
         assert!(result.is_err(), "Should fail for non-existent operation");
         let error_msg = result.unwrap_err().to_string();
@@ -769,74 +813,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_execute_operation_with_ui_state() {
-        let engine = RenderEngine::new_in_memory().await.unwrap();
-        let backend = engine.backend.write().await;
-
-        // Create test table
-        let conn = backend.get_connection().unwrap();
-        conn.execute(
-            "CREATE TABLE blocks (id TEXT PRIMARY KEY, content TEXT)",
-            ()
-        ).await.unwrap();
-
-        conn.execute(
-            "INSERT INTO blocks (id, content) VALUES ('block-1', 'Original content')",
-            ()
-        ).await.unwrap();
-
-        drop(conn);
-        drop(backend);
-
-        // Set UI state
-        let ui_state = UiState {
-            cursor_pos: Some(CursorPosition {
-                block_id: "block-1".to_string(),
-                offset: 5,
-            }),
-            focused_id: Some("block-1".to_string()),
-        };
-        engine.set_ui_state(ui_state).await.unwrap();
-
-        // Execute operation (registry already initialized in RenderEngine)
-        let mut params = HashMap::new();
-        params.insert("id".to_string(), Value::String("block-1".to_string()));
-        params.insert("field".to_string(), Value::String("content".to_string()));
-        params.insert("value".to_string(), Value::String("Updated content".to_string()));
-
-        let result = engine.execute_operation("update_field", params).await;
-        assert!(result.is_ok());
-
-        // Verify the update
-        let sql = "SELECT content FROM blocks WHERE id = 'block-1'";
-        let results = engine.execute_query(sql.to_string(), HashMap::new()).await.unwrap();
-        assert_eq!(results[0].get("content").unwrap().as_string(), Some("Updated content"));
-
-        // Verify UI state is preserved
-        let final_state = engine.get_ui_state().await;
-        assert_eq!(final_state.focused_id, Some("block-1".to_string()));
-        assert!(final_state.cursor_pos.is_some());
-    }
-
-    #[tokio::test]
     async fn test_register_custom_operation() {
-        use crate::operations::block_ops::UpdateField;
+        // Create engine with SqlOperationProvider registered via TestProviderModule
+        let temp_engine = create_test_engine().await.unwrap();
+        let provider = Arc::new(SqlOperationProvider::new(
+            temp_engine.backend.clone(),
+            "blocks".to_string(),
+            "blocks".to_string(),
+        ));
 
-        let mut engine = RenderEngine::new_in_memory().await.unwrap();
+        let engine = create_test_engine_with_providers(":memory:".into(), |module| {
+            module.with_operation_provider(provider)
+        }).await.unwrap();
 
-        // Register custom operation (UpdateField already registered, but this tests the mechanism)
-        let result = engine.register_operation(Arc::new(UpdateField));
-        assert!(result.is_ok(), "Should be able to register operation before sharing");
-
-        // Try to register after sharing (this should fail)
-        let _engine_arc = Arc::new(engine);
-        // Can't call register_operation on Arc<RenderEngine> - this is intentional
-        // to prevent runtime panics from Arc::get_mut
+        // Verify operations are available
+        let ops = engine.available_operations("blocks").await;
+        assert!(!ops.is_empty(), "Should have operations available");
     }
 
     #[tokio::test]
     async fn test_operations_inference() {
-        let engine = RenderEngine::new_in_memory().await.unwrap();
+        let engine = create_test_engine().await.unwrap();
 
         // PRQL query with widgets that reference direct table columns
         let prql = r#"

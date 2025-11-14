@@ -114,47 +114,55 @@ impl App for AppMain {
                 )?);
             }
 
-            // Handle app-level shortcuts (like 'r' for sync)
+            // Handle app-level shortcuts (like Ctrl+r for sync)
             // Only when NOT editing
-            if let InputEvent::Keyboard(KeyPress::Plain { key: Key::Character('r') }) = input_event {
-                // Generic sync trigger (works for any SyncableProvider)
-                let engine = global_data.state.engine.clone();
-                let sender_opt = global_data.state.main_thread_sender_channel.lock().unwrap().clone();
-                
-                tokio::spawn(async move {
-                    let engine_guard = engine.read().await;
-                    match engine_guard.sync_all_providers().await {
-                        Ok(_) => {
-                            if let Some(sender) = sender_opt {
-                                let _ = sender.send(
-                                    r3bl_tui::TerminalWindowMainThreadSignal::ApplyAppSignal(
-                                        AppSignal::OperationResult {
-                                            operation_name: "sync".to_string(),
-                                            success: true,
-                                            error_message: None,
-                                        }
-                                    )
-                                ).await;
+            if let InputEvent::Keyboard(KeyPress::WithModifiers {
+                key: Key::Character('r'),
+                mask,
+            }) = input_event {
+                if mask.ctrl_key_state == r3bl_tui::KeyState::Pressed {
+                    // Generic sync trigger (works for any SyncableProvider)
+                    let engine = global_data.state.engine.clone();
+                    let sender_opt = global_data.state.main_thread_sender_channel.lock().unwrap().clone();
+
+                    tracing::info!("[TUI] Sync triggered by user (Ctrl+r)");
+                    tokio::spawn(async move {
+                        tracing::info!("[TUI] Starting sync_all_providers()");
+                        match engine.sync_all_providers().await {
+                            Ok(_) => {
+                                tracing::info!("[TUI] sync_all_providers() completed successfully");
+                                if let Some(sender) = sender_opt {
+                                    let _ = sender.send(
+                                        r3bl_tui::TerminalWindowMainThreadSignal::ApplyAppSignal(
+                                            AppSignal::OperationResult {
+                                                operation_name: "sync".to_string(),
+                                                success: true,
+                                                error_message: None,
+                                            }
+                                        )
+                                    ).await;
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!("[TUI] sync_all_providers() failed: {}", e);
+                                if let Some(sender) = sender_opt {
+                                    let _ = sender.send(
+                                        r3bl_tui::TerminalWindowMainThreadSignal::ApplyAppSignal(
+                                            AppSignal::OperationResult {
+                                                operation_name: "sync".to_string(),
+                                                success: false,
+                                                error_message: Some(e.to_string()),
+                                            }
+                                        )
+                                    ).await;
+                                }
                             }
                         }
-                        Err(e) => {
-                            if let Some(sender) = sender_opt {
-                                let _ = sender.send(
-                                    r3bl_tui::TerminalWindowMainThreadSignal::ApplyAppSignal(
-                                        AppSignal::OperationResult {
-                                            operation_name: "sync".to_string(),
-                                            success: false,
-                                            error_message: Some(e.to_string()),
-                                        }
-                                    )
-                                ).await;
-                            }
-                        }
-                    }
-                });
-                
-                global_data.state.status_message = "Syncing...".to_string();
-                return Ok(EventPropagation::ConsumedRender);
+                    });
+
+                    global_data.state.status_message = "Syncing...".to_string();
+                    return Ok(EventPropagation::ConsumedRender);
+                }
             }
 
             // Route all other events to the focused component
@@ -178,7 +186,7 @@ impl App for AppMain {
             match action {
                 AppSignal::ExecuteOperation {
                     operation_name,
-                    table: _table,
+                    table,
                     id_column: _id_column,
                     id_value,
                     field,
@@ -187,6 +195,7 @@ impl App for AppMain {
                     // Clone values for async task
                     let engine = global_data.state.engine.clone();
                     let operation_name = operation_name.clone(); // Use operation name from descriptor
+                    let table_name = table.clone();
                     let id_val = id_value.clone();
                     let field_name = field.clone();
                     let value = new_value.clone();
@@ -196,7 +205,9 @@ impl App for AppMain {
 
                     // Spawn async task to execute operation
                     tokio::spawn(async move {
-                        let engine_guard = engine.read().await;
+                        // Get entity name from table mapping, fallback to table name if not mapped
+                        let entity_name = engine.get_entity_for_table(&table_name).await
+                            .unwrap_or_else(|| table_name.clone());
 
                         // Build parameters for the operation
                         // UpdateField expects: id, field, value (and optionally table)
@@ -206,7 +217,7 @@ impl App for AppMain {
                         params.insert("value".to_string(), value);
 
                         // Execute the operation
-                        let result = engine_guard.execute_operation(&operation_name, params).await;
+                        let result = engine.execute_operation(&entity_name, &operation_name, params).await;
 
                         // Send result back to UI thread via signal
                         if let Some(sender) = sender_opt {
@@ -351,7 +362,7 @@ fn render_status_bar(pipeline: &mut RenderPipeline, size: Size, status_msg: &str
     let color_bg = tui_color!(hex "#076DEB");
     let color_fg = tui_color!(hex "#E9C940");
 
-    let help_text = format!("Ctrl+q: Exit | ↑/↓: Navigate/Edit | x: Toggle | Ctrl+→/←: Indent/Outdent | Ctrl+↑/↓: Move | Alt+Enter: Split | {}", status_msg);
+    let help_text = format!("Ctrl+q: Exit | ↑/↓: Navigate/Edit | Ctrl+x: Toggle | Ctrl+r: Sync | Ctrl+→/←: Indent/Outdent | Ctrl+↑/↓: Move | Alt+Enter: Split | {}", status_msg);
 
     // Use stylesheet for status bar styling
     let styled_texts = tui_styled_texts! {
@@ -435,7 +446,7 @@ fn save_editing_block_on_exit(
             global_data.state.editing_buffer = None;
 
             // Now we can borrow state.data immutably and execute synchronously
-            if let Some((operation_name, _table, id_column, field)) = operation_info {
+            if let Some((operation_name, table, id_column, field)) = operation_info {
                 if let Some(row_data) = global_data.state.data.get(editing_idx) {
                     if let Some(id_value) = row_data.get(&id_column) {
                         if let Some(id_str) = id_value.as_string() {
@@ -444,6 +455,7 @@ fn save_editing_block_on_exit(
                             // a runtime from within an existing runtime
                             let engine = global_data.state.engine.clone();
                             let operation_name = operation_name.clone(); // Use operation name from descriptor
+                            let table_name = table.clone();
                             let id_val = id_str.to_string();
                             let field_name = field.clone();
                             let value = rusty_knowledge::storage::types::Value::String(buffer_content);
@@ -462,8 +474,10 @@ fn save_editing_block_on_exit(
                                     Err(e) => return Err(format!("Failed to create runtime: {}", e)),
                                 };
                                 rt.block_on(async {
-                                    let engine_guard = engine.read().await;
-                                    engine_guard.execute_operation(&operation_name, params).await
+                                    // Get entity name from table mapping, fallback to table name if not mapped
+                                    let entity_name = engine.get_entity_for_table(&table_name).await
+                                        .unwrap_or_else(|| table_name.clone());
+                                    engine.execute_operation(&entity_name, &operation_name, params).await
                                 })
                                 .map_err(|e| format!("Operation error: {}", e))
                             })

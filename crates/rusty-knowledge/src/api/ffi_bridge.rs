@@ -1,20 +1,38 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use anyhow::{Result, anyhow};
-use tokio::sync::RwLock;
+use ferrous_di::{ServiceCollection, ServiceCollectionModuleExt, Resolver};
 
-use crate::api::render_engine::{RenderEngine, UiState};
+use crate::api::backend_engine::BackendEngine;
 use crate::storage::turso::RowChangeStream;
 use crate::storage::types::{Value, StorageEntity};
+use crate::di;
+use crate::api::operation_dispatcher::OperationModule;
 use query_render::RenderSpec;
 
 /// Initialize a render engine with a database at the given path
 ///
 /// # FFI Function
 /// This is exposed to Flutter via flutter_rust_bridge
-pub async fn init_render_engine(db_path: String) -> Result<Arc<RwLock<RenderEngine>>> {
-    let engine = RenderEngine::new(db_path.into()).await?;
-    Ok(Arc::new(RwLock::new(engine)))
+///
+/// Uses dependency injection to properly configure the engine with all registered providers.
+pub async fn init_render_engine(db_path: String) -> Result<Arc<BackendEngine>> {
+    // Set up dependency injection container
+    let mut services = ServiceCollection::new();
+
+    // Register OperationModule to collect providers from DI
+    services.add_module_mut(OperationModule)
+        .map_err(|e| anyhow::anyhow!("Failed to register OperationModule: {}", e))?;
+
+    // Register core services (BackendEngine, TursoBackend, OperationDispatcher)
+    di::register_core_services(&mut services, db_path.into())
+        .map_err(|e| anyhow::anyhow!("Failed to register core services: {}", e))?;
+
+    // Build the DI container and resolve BackendEngine
+    let provider = services.build();
+    let engine = Resolver::get_required::<BackendEngine>(&provider);
+
+    Ok(engine)
 }
 
 /// Compile a PRQL query with render() into SQL and UI specification
@@ -25,10 +43,9 @@ pub async fn init_render_engine(db_path: String) -> Result<Arc<RwLock<RenderEngi
 /// # Returns
 /// A tuple of (SQL string, RenderSpec) on success
 pub async fn compile_query(
-    engine: Arc<RwLock<RenderEngine>>,
+    engine: Arc<BackendEngine>,
     prql: String,
 ) -> Result<(String, RenderSpec)> {
-    let engine = engine.read().await;
     engine.compile_query(prql)
 }
 
@@ -40,11 +57,10 @@ pub async fn compile_query(
 /// Note: This is a simple synchronous query execution for initial rendering.
 /// For reactive updates, use watch_query instead.
 pub async fn execute_query(
-    engine: Arc<RwLock<RenderEngine>>,
+    engine: Arc<BackendEngine>,
     sql: String,
     params: HashMap<String, Value>,
 ) -> Result<Vec<StorageEntity>> {
-    let engine = engine.read().await;
     engine.execute_query(sql, params).await
 }
 
@@ -60,36 +76,13 @@ pub async fn execute_query(
 /// This function does NOT return new data. Changes propagate through:
 /// Operation → DB mutation → CDC event → watch_query stream → UI update
 pub async fn execute_operation(
-    _engine: Arc<RwLock<RenderEngine>>,
+    _engine: Arc<BackendEngine>,
     _op_name: String,
     _params: HashMap<String, Value>,
 ) -> Result<()> {
     // TODO: Implement operation registry and execution (Phase 3.1-3.2)
     // For now, this is a stub that will be implemented when operations are added
     Err(anyhow!("Operations not yet implemented - coming in Phase 3.1"))
-}
-
-/// Update the UI state (cursor position, focused block)
-///
-/// # FFI Function
-/// This is exposed to Flutter via flutter_rust_bridge
-pub async fn set_ui_state(
-    engine: Arc<RwLock<RenderEngine>>,
-    ui_state: UiState,
-) -> Result<()> {
-    let engine = engine.read().await;
-    engine.set_ui_state(ui_state).await
-}
-
-/// Get the current UI state
-///
-/// # FFI Function
-/// This is exposed to Flutter via flutter_rust_bridge
-pub async fn get_ui_state(
-    engine: Arc<RwLock<RenderEngine>>,
-) -> Result<UiState> {
-    let engine = engine.read().await;
-    Ok(engine.get_ui_state().await)
 }
 
 /// Watch a SQL query for changes via CDC streaming
@@ -103,15 +96,14 @@ pub async fn get_ui_state(
 /// 3. Handle Added/Updated/Removed events to update UI
 ///
 /// # Note
-/// The CDC connection is stored in the RenderEngine to keep it alive.
+/// The CDC connection is stored in the BackendEngine to keep it alive.
 /// Currently returns changes from all tables. Full CDC integration with
 /// materialized views will be implemented in Phase 1.3.
 pub async fn watch_query(
-    engine: Arc<RwLock<RenderEngine>>,
+    engine: Arc<BackendEngine>,
     sql: String,
     params: HashMap<String, Value>,
 ) -> Result<RowChangeStream> {
-    let mut engine = engine.write().await;
     engine.watch_query(sql, params).await
 }
 
@@ -121,8 +113,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_init_and_compile() {
-        let engine = RenderEngine::new_in_memory().await.unwrap();
-        let engine = Arc::new(RwLock::new(engine));
+        // Use DI to create engine (same as production)
+        let engine = init_render_engine(":memory:".to_string()).await.unwrap();
 
         let prql = r#"
             from blocks
@@ -138,26 +130,11 @@ mod tests {
         assert!(sql.contains("FROM"));
     }
 
-    #[tokio::test]
-    async fn test_ui_state_operations() {
-        let engine = RenderEngine::new_in_memory().await.unwrap();
-        let engine = Arc::new(RwLock::new(engine));
-
-        let state = UiState {
-            cursor_pos: None,
-            focused_id: Some("test-block".to_string()),
-        };
-
-        set_ui_state(engine.clone(), state.clone()).await.unwrap();
-        let retrieved = get_ui_state(engine).await.unwrap();
-
-        assert_eq!(retrieved.focused_id, state.focused_id);
-    }
 
     #[tokio::test]
     async fn test_execute_operation_not_implemented() {
-        let engine = RenderEngine::new_in_memory().await.unwrap();
-        let engine = Arc::new(RwLock::new(engine));
+        // Use DI to create engine (same as production)
+        let engine = init_render_engine(":memory:".to_string()).await.unwrap();
 
         let result = execute_operation(
             engine,

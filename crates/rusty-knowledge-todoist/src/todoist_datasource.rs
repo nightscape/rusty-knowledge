@@ -35,17 +35,6 @@ impl TodoistTaskDataSource {
     pub fn new(provider: Arc<TodoistSyncProvider>) -> Self {
         Self { provider }
     }
-
-    pub fn from_api_key(api_key: &str) -> Self {
-        Self {
-            provider: Arc::new(TodoistSyncProvider::from_api_key(api_key).build()),
-        }
-    }
-
-    /// Get the underlying provider (for testing)
-    pub fn provider(&self) -> &Arc<TodoistSyncProvider> {
-        &self.provider
-    }
 }
 
 
@@ -102,11 +91,11 @@ impl ChangeNotifications<TodoistTask> for TodoistTaskDataSource {
     }
 
     async fn get_current_version(&self) -> std::result::Result<Vec<u8>, ApiError> {
-        // Return sync token as version, or empty vec if no token
-        let token = self.provider.get_sync_token().await;
-        Ok(token
-            .map(|t| t.as_bytes().to_vec())
-            .unwrap_or_default())
+        // Note: Sync tokens are now managed externally (by OperationDispatcher or caller)
+        // This method should return the current version from the dispatcher or database
+        // For now, return empty vec - the version should be retrieved from OperationDispatcher
+        // TODO: Get sync token from OperationDispatcher or database
+        Ok(Vec::new())
     }
 }
 
@@ -268,17 +257,6 @@ impl TodoistProjectDataSource {
     pub fn new(provider: Arc<TodoistSyncProvider>) -> Self {
         Self { provider }
     }
-
-    pub fn from_api_key(api_key: &str) -> Self {
-        Self {
-            provider: Arc::new(TodoistSyncProvider::from_api_key(api_key).build()),
-        }
-    }
-
-    /// Get the underlying provider (for testing)
-    pub fn provider(&self) -> &Arc<TodoistSyncProvider> {
-        &self.provider
-    }
 }
 
 
@@ -329,11 +307,11 @@ impl ChangeNotifications<TodoistProject> for TodoistProjectDataSource {
     }
 
     async fn get_current_version(&self) -> std::result::Result<Vec<u8>, ApiError> {
-        // Return sync token as version, or empty vec if no token
-        let token = self.provider.get_sync_token().await;
-        Ok(token
-            .map(|t| t.as_bytes().to_vec())
-            .unwrap_or_default())
+        // Note: Sync tokens are now managed externally (by OperationDispatcher or caller)
+        // This method should return the current version from the dispatcher or database
+        // For now, return empty vec - the version should be retrieved from OperationDispatcher
+        // TODO: Get sync token from OperationDispatcher or database
+        Ok(Vec::new())
     }
 }
 
@@ -428,25 +406,6 @@ impl CrudOperationProvider<TodoistProject> for TodoistProjectDataSource {
     async fn delete(&self, id: &str) -> Result<()> {
         self.provider.client.delete_project(id).await?;
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn test_task_datasource_creation() {
-        let datasource = TodoistTaskDataSource::from_api_key("test_api_key");
-        // Verify it can be created
-        assert!(datasource.provider().get_sync_token().await.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_project_datasource_creation() {
-        let datasource = TodoistProjectDataSource::from_api_key("test_api_key");
-        // Verify it can be created
-        assert!(datasource.provider().get_sync_token().await.is_none());
     }
 }
 

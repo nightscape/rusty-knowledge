@@ -7,10 +7,12 @@
 use super::tui_pbt_backend::TuiR3blPbtBackend;
 use rusty_knowledge::api::pbt_infrastructure::*;
 use rusty_knowledge::api::repository::CoreOperations;
-use rusty_knowledge::api::render_engine::RenderEngine;
+use rusty_knowledge::api::backend_engine::BackendEngine;
+use rusty_knowledge::di;
+use rusty_knowledge::api::operation_dispatcher::OperationModule;
+use ferrous_di::{ServiceCollection, ServiceCollectionModuleExt, Resolver};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 /// TUI-R3BL backend test state for property-based testing
 pub struct TuiR3blBlockTreeTest {
@@ -30,13 +32,26 @@ impl StateMachineTest for TuiR3blBlockTreeTest {
     ) -> Self::SystemUnderTest {
         let runtime = Arc::new(tokio::runtime::Runtime::new().unwrap());
 
-        // Create in-memory RenderEngine
-        let engine = runtime
-            .block_on(RenderEngine::new_in_memory())
-            .expect("Failed to create RenderEngine");
+        // Create in-memory BackendEngine using dependency injection
+        let engine = runtime.block_on(async {
+            // Set up dependency injection container
+            let mut services = ServiceCollection::new();
+
+            // Register OperationModule to collect providers from DI
+            services.add_module_mut(OperationModule)
+                .expect("Failed to register OperationModule");
+
+            // Register core services with in-memory database
+            di::register_core_services(&mut services, ":memory:".into())
+                .expect("Failed to register core services");
+
+            // Build the DI container and resolve BackendEngine
+            let provider = services.build();
+            Resolver::get_required::<BackendEngine>(&provider)
+        });
 
         // Initialize blocks table schema
-        let backend_wrapper = TuiR3blPbtBackend::new(Arc::new(RwLock::new(engine)));
+        let backend_wrapper = TuiR3blPbtBackend::new(engine);
         runtime
             .block_on(backend_wrapper.ensure_schema())
             .expect("Failed to initialize schema");

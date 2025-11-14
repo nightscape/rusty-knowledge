@@ -169,13 +169,13 @@ async fn run_simple_tui() -> Result<(), Box<dyn std::error::Error>> {
     use std::sync::Arc;
     use tokio::sync::RwLock;
     use std::collections::HashMap;
-    use rusty_knowledge::api::render_engine::RenderEngine;
+    use rusty_knowledge::api::render_engine::BackendEngine;
     use rusty_knowledge::storage::fractional_index::gen_key_between;
 
     let app = AppMain::new_boxed();
 
-    // Initialize RenderEngine with in-memory database
-    let mut engine = RenderEngine::new_in_memory().await?;
+    // Initialize BackendEngine with in-memory database
+    let mut engine = BackendEngine::new_in_memory().await?;
 
     // Create blocks table
     let create_table_sql = r#"

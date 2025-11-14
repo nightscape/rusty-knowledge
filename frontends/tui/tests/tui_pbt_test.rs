@@ -3,7 +3,7 @@
 //! This module runs property-based tests against the tui backend
 //! to verify it behaves identically to the MemoryBackend reference implementation.
 
-use tui_r3bl_frontend::tui_r3bl_pbt_state_machine::TuiR3blBlockTreeTest;
+use tui_r3bl_frontend::tui_pbt_state_machine::TuiR3blBlockTreeTest;
 use proptest::prelude::*;
 
 proptest_state_machine::prop_state_machine! {

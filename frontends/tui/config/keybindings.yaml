@@ -1,6 +1,7 @@
 bindings:
   # Character keys
   - key: "x"
+    modifiers: ["ctrl"]
     context: "navigation"
     action: "toggle_completion"
 

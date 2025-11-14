@@ -37,6 +37,7 @@ libsql = { version = "0.9", features = ["core", "remote"] }
 rusty-knowledge = { path = "../../crates/rusty-knowledge" }
 rusty-knowledge-todoist = { path = "../../crates/rusty-knowledge-todoist" }
 query-render = { path = "../../crates/query-render" }
+ferrous-di = { path = "/Users/martin/Workspaces/rust/ferrous-di", features = ["async"] }
 uuid = { version = "1", features = ["v4"] }
 
 # Logging

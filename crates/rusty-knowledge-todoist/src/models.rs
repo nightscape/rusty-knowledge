@@ -61,6 +61,10 @@ impl TodoistTask {
 // Implement BlockEntity trait for TodoistTask
 // Note: sort_key and depth are computed dynamically since they're not stored in TodoistTask
 impl rusty_knowledge::core::datasource::BlockEntity for TodoistTask {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
     fn parent_id(&self) -> Option<&str> {
         self.parent_id.as_deref()
     }
@@ -79,6 +83,10 @@ impl rusty_knowledge::core::datasource::BlockEntity for TodoistTask {
         } else {
             0
         }
+    }
+
+    fn content(&self) -> &str {
+        &self.content
     }
 }
 
@@ -113,7 +121,7 @@ impl rusty_knowledge::core::datasource::OperationRegistry for TodoistTask {
         };
 
         let entity_name = Self::entity_name();
-        let table = "todoist_tasks";
+        let table = entity_name; // Use entity_name as table name - no mapping needed!
         let id_column = "id";
 
         // Aggregate operations from all applicable traits
@@ -125,7 +133,7 @@ impl rusty_knowledge::core::datasource::OperationRegistry for TodoistTask {
     }
 
     fn entity_name() -> &'static str {
-        "todoist-task"
+        "todoist_tasks"  // Match table name - no mapping needed!
     }
 }
 
