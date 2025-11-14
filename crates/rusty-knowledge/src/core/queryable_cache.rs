@@ -49,7 +49,7 @@ where
         cache.initialize_schema().await?;
         Ok(cache)
     }
-    
+
     // Keep old methods for backward compatibility during transition
     #[allow(dead_code)]
     pub async fn new(source: S) -> Result<Self> {
@@ -60,7 +60,7 @@ where
         ));
         Self::new_with_backend(source, backend).await
     }
-    
+
     #[allow(dead_code)]
     pub async fn with_database(source: S, db_path: &str) -> Result<Self> {
         let backend = Arc::new(RwLock::new(
@@ -349,11 +349,11 @@ where
     ) -> Pin<Box<dyn Stream<Item = std::result::Result<Vec<Change<StorageEntity>>, ApiError>> + Send>> {
         // IMPORTANT: No auto-sync here - caller must sync first
         // This allows offline startup without sync attempts
-        
+
         let schema = T::schema();
         let table_name = schema.table_name.clone();
         let backend = self.backend.read().await;
-        
+
         // Get CDC stream from TursoBackend
         let (cdc_conn, row_change_stream) = match backend.row_changes() {
             Ok(result) => result,
@@ -363,36 +363,36 @@ where
                 return Box::pin(tokio_stream::once(Err(error)));
             }
         };
-        
+
         // Store connection to keep it alive for CDC callbacks
         // CRITICAL: The connection MUST stay alive for the callback closure to stay alive
         // The callback closure captures the channel sender (tx), which closes the stream if dropped
         // We keep it in an Arc<Mutex> and move it into the stream state
         let conn_guard = Arc::new(tokio::sync::Mutex::new(cdc_conn));
-        
+
         // TODO: Option A - Filter stream for this table and convert RowChange to Change<StorageEntity>
         // This is inefficient when multiple QueryableCache instances share the same backend.
         // Consider optimizing to Option B (table-specific subscriptions) in the future.
         use tokio_stream::StreamExt;
         use crate::storage::turso::{RowChange, ChangeData};
-        
+
         // Create a wrapper stream that holds the connection to keep it alive
         // The connection must stay alive for CDC callbacks to work
         let table_name_clone = table_name.clone();
-        
+
         // Use a custom stream wrapper that holds the connection
         // This ensures the connection stays alive for the lifetime of the stream
         struct ConnectionStream<S> {
             _conn: Arc<tokio::sync::Mutex<turso::Connection>>,
             stream: S,
         }
-        
+
         impl<S> Stream for ConnectionStream<S>
         where
             S: Stream + Unpin,
         {
             type Item = S::Item;
-            
+
             fn poll_next(
                 mut self: Pin<&mut Self>,
                 cx: &mut Context<'_>,
@@ -400,12 +400,12 @@ where
                 Pin::new(&mut self.stream).poll_next(cx)
             }
         }
-        
+
         let wrapped_stream = ConnectionStream {
             _conn: conn_guard,
             stream: row_change_stream,
         };
-        
+
         let filtered_stream = wrapped_stream
             .filter(move |row_change: &RowChange| {
                 row_change.relation_name == table_name_clone
@@ -415,7 +415,7 @@ where
                 // StorageEntity is HashMap<String, Value>, so we can use data directly
                 match row_change.change {
                     ChangeData::Created { data, origin } => {
-                        Ok(vec![Change::Created { 
+                        Ok(vec![Change::Created {
                             data, // data is already HashMap<String, Value> = StorageEntity
                             origin,
                         }])
@@ -443,10 +443,10 @@ where
                     }
                 }
             });
-        
+
         Box::pin(filtered_stream)
     }
-    
+
     async fn get_current_version(&self) -> std::result::Result<Vec<u8>, ApiError> {
         // Return empty version vector for now
         // Could be enhanced to track sync tokens
@@ -589,7 +589,10 @@ mod tests {
     async fn test_queryable_cache_creation() {
         let source = InMemoryDataSource::new();
         let cache = QueryableCache::new(source).await.unwrap();
-        assert!(cache.db.read().await.is_none());
+        // Verify backend exists and can get a connection
+        let backend = cache.backend.read().await;
+        let conn = backend.get_connection();
+        assert!(conn.is_ok());
     }
 
     #[tokio::test]
@@ -598,7 +601,10 @@ mod tests {
         let cache = QueryableCache::with_database(source, ":memory:")
             .await
             .unwrap();
-        assert!(cache.db.read().await.is_some());
+        // Verify backend exists and can get a connection
+        let backend = cache.backend.read().await;
+        let conn = backend.get_connection();
+        assert!(conn.is_ok());
     }
 
     #[tokio::test]

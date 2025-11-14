@@ -61,6 +61,10 @@ impl TodoistTask {
 // Implement BlockEntity trait for TodoistTask
 // Note: sort_key and depth are computed dynamically since they're not stored in TodoistTask
 impl rusty_knowledge::core::datasource::BlockEntity for TodoistTask {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
     fn parent_id(&self) -> Option<&str> {
         self.parent_id.as_deref()
     }
@@ -79,6 +83,10 @@ impl rusty_knowledge::core::datasource::BlockEntity for TodoistTask {
         } else {
             0
         }
+    }
+
+    fn content(&self) -> &str {
+        &self.content
     }
 }
 

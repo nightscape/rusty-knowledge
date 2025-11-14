@@ -23,7 +23,7 @@ use query_render::OperationDescriptor;
 pub struct OperationDispatcher {
     /// Map from entity_name to operation provider
     providers: HashMap<String, Arc<dyn OperationProvider>>,
-    
+
     /// Map from provider_name to syncable provider
     /// Key: provider_name (e.g., "todoist", "jira")
     /// Value: SyncableProvider wrapped in Mutex for mutable sync access
@@ -38,7 +38,7 @@ impl OperationDispatcher {
             syncable_providers: HashMap::new(),
         }
     }
-    
+
     /// Register a syncable provider
     ///
     /// # Arguments
@@ -47,7 +47,7 @@ impl OperationDispatcher {
     pub fn register_syncable_provider(&mut self, provider_name: String, provider: Arc<Mutex<dyn SyncableProvider>>) {
         self.syncable_providers.insert(provider_name.clone(), provider);
     }
-    
+
     /// Sync a specific provider by name
     ///
     /// Provider name can be extracted from operation name using `provider.operation` convention.
@@ -56,11 +56,11 @@ impl OperationDispatcher {
         let provider = self.syncable_providers
             .get(provider_name)
             .ok_or_else(|| format!("No syncable provider registered: {}", provider_name))?;
-        
+
         let mut provider_guard = provider.lock().await;
         provider_guard.sync().await
     }
-    
+
     /// Sync provider from operation name
     ///
     /// Extracts provider name from `provider.operation` format.
@@ -72,7 +72,7 @@ impl OperationDispatcher {
             .ok_or_else(|| format!("Invalid operation name format: {}", operation_name))?;
         self.sync_provider(provider_name).await
     }
-    
+
     /// Sync all registered providers
     pub async fn sync_all_providers(&self) -> Result<()> {
         info!("[OperationDispatcher] Syncing all providers: count={}", self.syncable_providers.len());
@@ -91,7 +91,7 @@ impl OperationDispatcher {
         }
         Ok(())
     }
-    
+
     /// Get list of registered syncable provider names
     pub fn syncable_provider_names(&self) -> Vec<String> {
         self.syncable_providers.keys().cloned().collect()
@@ -137,6 +137,7 @@ impl OperationDispatcher {
     pub fn provider_count(&self) -> usize {
         self.providers.len()
     }
+
 }
 
 impl Default for OperationDispatcher {
@@ -155,12 +156,12 @@ impl OperationProvider for OperationDispatcher {
             .values()
             .flat_map(|provider| provider.operations())
             .collect();
-        
+
         // Add sync operations for all registered syncable providers
         for provider_name in self.syncable_providers.keys() {
             ops.push(generate_sync_operation(provider_name));
         }
-        
+
         ops
     }
 
@@ -207,7 +208,7 @@ impl OperationProvider for OperationDispatcher {
         if op_name == "sync" && entity_name.contains('.') {
             return self.sync_provider_from_operation(entity_name).await;
         }
-        
+
         // Otherwise, route to regular operation provider
         let provider = self
             .providers
@@ -222,7 +223,8 @@ impl OperationProvider for OperationDispatcher {
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use crate::storage::types::{StorageEntity, Value};
+    use crate::storage::types::StorageEntity;
+    use query_render::{OperationParam, TypeHint};
 
     // Mock OperationProvider for testing
     struct MockProvider {

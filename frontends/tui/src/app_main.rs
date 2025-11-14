@@ -120,7 +120,7 @@ impl App for AppMain {
                 // Generic sync trigger (works for any SyncableProvider)
                 let engine = global_data.state.engine.clone();
                 let sender_opt = global_data.state.main_thread_sender_channel.lock().unwrap().clone();
-                
+
                 tokio::spawn(async move {
                     let engine_guard = engine.read().await;
                     match engine_guard.sync_all_providers().await {
@@ -152,7 +152,7 @@ impl App for AppMain {
                         }
                     }
                 });
-                
+
                 global_data.state.status_message = "Syncing...".to_string();
                 return Ok(EventPropagation::ConsumedRender);
             }
@@ -178,7 +178,7 @@ impl App for AppMain {
             match action {
                 AppSignal::ExecuteOperation {
                     operation_name,
-                    table: _table,
+                    table,
                     id_column: _id_column,
                     id_value,
                     field,
@@ -187,6 +187,7 @@ impl App for AppMain {
                     // Clone values for async task
                     let engine = global_data.state.engine.clone();
                     let operation_name = operation_name.clone(); // Use operation name from descriptor
+                    let table_name = table.clone();
                     let id_val = id_value.clone();
                     let field_name = field.clone();
                     let value = new_value.clone();
@@ -198,6 +199,10 @@ impl App for AppMain {
                     tokio::spawn(async move {
                         let engine_guard = engine.read().await;
 
+                        // Get entity name from table mapping, fallback to table name if not mapped
+                        let entity_name = engine_guard.get_entity_for_table(&table_name).await
+                            .unwrap_or_else(|| table_name.clone());
+
                         // Build parameters for the operation
                         // UpdateField expects: id, field, value (and optionally table)
                         let mut params = std::collections::HashMap::new();
@@ -206,7 +211,7 @@ impl App for AppMain {
                         params.insert("value".to_string(), value);
 
                         // Execute the operation
-                        let result = engine_guard.execute_operation(&operation_name, params).await;
+                        let result = engine_guard.execute_operation(&entity_name, &operation_name, params).await;
 
                         // Send result back to UI thread via signal
                         if let Some(sender) = sender_opt {
@@ -435,7 +440,7 @@ fn save_editing_block_on_exit(
             global_data.state.editing_buffer = None;
 
             // Now we can borrow state.data immutably and execute synchronously
-            if let Some((operation_name, _table, id_column, field)) = operation_info {
+            if let Some((operation_name, table, id_column, field)) = operation_info {
                 if let Some(row_data) = global_data.state.data.get(editing_idx) {
                     if let Some(id_value) = row_data.get(&id_column) {
                         if let Some(id_str) = id_value.as_string() {
@@ -444,6 +449,7 @@ fn save_editing_block_on_exit(
                             // a runtime from within an existing runtime
                             let engine = global_data.state.engine.clone();
                             let operation_name = operation_name.clone(); // Use operation name from descriptor
+                            let table_name = table.clone();
                             let id_val = id_str.to_string();
                             let field_name = field.clone();
                             let value = rusty_knowledge::storage::types::Value::String(buffer_content);
@@ -463,7 +469,10 @@ fn save_editing_block_on_exit(
                                 };
                                 rt.block_on(async {
                                     let engine_guard = engine.read().await;
-                                    engine_guard.execute_operation(&operation_name, params).await
+                                    // Get entity name from table mapping, fallback to table name if not mapped
+                                    let entity_name = engine_guard.get_entity_for_table(&table_name).await
+                                        .unwrap_or_else(|| table_name.clone());
+                                    engine_guard.execute_operation(&entity_name, &operation_name, params).await
                                 })
                                 .map_err(|e| format!("Operation error: {}", e))
                             })

@@ -130,7 +130,7 @@ impl State {
     pub fn execute_operation_on_selected(
         &mut self,
         op_name: &str,
-        ui_state_override: Option<rusty_knowledge::api::render_engine::UiState>,
+        ui_state_override: Option<rusty_knowledge::api::UiState>,
     ) -> Result<(), String> {
         // Get the full row data for the selected block - operations may need more than just id
         let row_data = match self.data.get(self.selected_index) {
@@ -150,10 +150,17 @@ impl State {
 
         // Spawn async operation in background - does NOT block the UI
         tokio::spawn(async move {
+            // Get entity name from table mapping (block operations are on "blocks" table)
+            let entity_name = {
+                let engine_guard = engine.read().await;
+                engine_guard.get_entity_for_table("blocks").await
+                    .unwrap_or_else(|| "blocks".to_string())
+            };
+
             // Check if operation is available before executing
             let has_op = {
                 let engine_guard = engine.read().await;
-                engine_guard.has_operation(&op_name_owned)
+                engine_guard.has_operation(&entity_name, &op_name_owned).await
             };
 
             if !has_op {
@@ -171,19 +178,10 @@ impl State {
                 return;
             }
 
-            // Set UI state if provided (e.g., for split operation with cursor position)
-            if let Some(ui_state) = ui_state_override {
-                let engine_guard = engine.read().await;
-                if let Err(e) = engine_guard.set_ui_state(ui_state).await {
-                    eprintln!("Failed to set UI state for operation '{}': {}", op_name_owned, e);
-                    // Continue anyway - operation might not need UI state
-                }
-            }
-
             // Execute the operation
             let result = {
                 let engine_guard = engine.read().await;
-                engine_guard.execute_operation(&op_name_owned, row_data).await
+                engine_guard.execute_operation(&entity_name, &op_name_owned, row_data).await
             };
 
             // Send result back to UI thread via signal

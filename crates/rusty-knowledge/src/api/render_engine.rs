@@ -6,8 +6,8 @@ use tokio::sync::RwLock;
 
 use crate::storage::turso::{TursoBackend, RowChangeStream};
 use crate::storage::types::{Value, StorageEntity};
-use crate::operations::OperationRegistry;
 use crate::api::operation_dispatcher::OperationDispatcher;
+use crate::api::ui_types::UiState;
 use crate::core::datasource::OperationProvider;
 use query_render::RenderSpec;
 
@@ -20,28 +20,10 @@ pub enum RowEvent {
     Removed { id: String },
 }
 
-/// UI state containing cursor position and focused block
-/// flutter_rust_bridge:non_opaque
-#[derive(Debug, Clone)]
-pub struct UiState {
-    pub cursor_pos: Option<CursorPosition>,
-    pub focused_id: Option<String>,
-}
-
-/// Cursor position within a block
-/// flutter_rust_bridge:non_opaque
-#[derive(Debug, Clone)]
-pub struct CursorPosition {
-    pub block_id: String,
-    pub offset: u32,
-}
-
 /// Main render engine managing database, query compilation, and operations
 pub struct RenderEngine {
     backend: Arc<RwLock<TursoBackend>>,
-    ui_state: Arc<RwLock<UiState>>,
-    operations: Arc<OperationRegistry>, // Legacy registry (kept for backward compatibility)
-    dispatcher: Arc<RwLock<OperationDispatcher>>, // New trait-based operation dispatcher
+    dispatcher: Arc<RwLock<OperationDispatcher>>, // Operation dispatcher for routing operations
     table_to_entity_map: Arc<RwLock<HashMap<String, String>>>, // Maps table names to entity names
     // CDC connection kept alive for streaming
     // CRITICAL: This must stay alive for CDC callbacks to work
@@ -52,23 +34,18 @@ pub struct RenderEngine {
 impl RenderEngine {
     /// Create a new render engine with a database at the given path
     ///
-    /// Automatically registers default block operations:
-    /// - UpdateField
-    /// - Indent
-    /// - Outdent
-    /// - MoveBlock
+    /// Operations are provided via OperationProvider implementations.
+    /// - CRUD operations (set_field, create, delete) via CrudOperationProvider
+    /// - Block movement operations (indent_block, outdent_block, move_block, etc.)
+    ///   via MutableBlockDataSource trait for entities implementing BlockEntity.
     pub async fn new(db_path: PathBuf) -> Result<Self> {
-        let backend = TursoBackend::new(db_path).await?;
-        let operations = Self::create_default_registry();
+        let backend = Arc::new(RwLock::new(TursoBackend::new(db_path).await?));
+
+        let dispatcher = OperationDispatcher::new();
 
         Ok(Self {
-            backend: Arc::new(RwLock::new(backend)),
-            ui_state: Arc::new(RwLock::new(UiState {
-                cursor_pos: None,
-                focused_id: None,
-            })),
-            operations: Arc::new(operations),
-            dispatcher: Arc::new(RwLock::new(OperationDispatcher::new())),
+            backend,
+            dispatcher: Arc::new(RwLock::new(dispatcher)),
             table_to_entity_map: Arc::new(RwLock::new(HashMap::new())),
             _cdc_conn: None,
         })
@@ -78,37 +55,40 @@ impl RenderEngine {
     ///
     /// Automatically registers default block operations.
     pub async fn new_in_memory() -> Result<Self> {
-        let backend = TursoBackend::new_in_memory().await?;
-        let operations = Self::create_default_registry();
+        let backend = Arc::new(RwLock::new(TursoBackend::new_in_memory().await?));
+
+        let dispatcher = OperationDispatcher::new();
 
         Ok(Self {
-            backend: Arc::new(RwLock::new(backend)),
-            ui_state: Arc::new(RwLock::new(UiState {
-                cursor_pos: None,
-                focused_id: None,
-            })),
-            operations: Arc::new(operations),
-            dispatcher: Arc::new(RwLock::new(OperationDispatcher::new())),
+            backend,
+            dispatcher: Arc::new(RwLock::new(dispatcher)),
             table_to_entity_map: Arc::new(RwLock::new(HashMap::new())),
             _cdc_conn: None,
         })
     }
-    // TODO: Get rid of this, no defaults should be hard-coded
-    /// Create and populate the default operation registry
-    fn create_default_registry() -> OperationRegistry {
-        use crate::operations::block_ops::{UpdateField, SplitBlock};
-        use crate::operations::block_movements::{Indent, Outdent, MoveBlock, MoveUp, MoveDown};
+    /// Create RenderEngine from dependencies (for dependency injection)
+    ///
+    /// This constructor allows creating RenderEngine with pre-constructed dependencies,
+    /// useful for dependency injection frameworks.
+    pub async fn from_dependencies(
+        backend: Arc<RwLock<TursoBackend>>,
+        dispatcher: Arc<RwLock<OperationDispatcher>>,
+    ) -> Result<Self> {
 
-        let mut registry = OperationRegistry::new();
-        registry.register(Arc::new(UpdateField));
-        registry.register(Arc::new(SplitBlock));
-        registry.register(Arc::new(Indent));
-        registry.register(Arc::new(Outdent));
-        registry.register(Arc::new(MoveBlock));
-        registry.register(Arc::new(MoveUp));
-        registry.register(Arc::new(MoveDown));
-        registry
+        // Operations are now provided via OperationProvider implementations
+        // No legacy operations need to be registered
+
+        Ok(Self {
+            backend,
+            dispatcher,
+            table_to_entity_map: Arc::new(RwLock::new(HashMap::new())),
+            _cdc_conn: None,
+        })
     }
+
+    // Legacy operations have been migrated to trait-based operations
+    // set_field, create, delete are available via CrudOperationProvider
+    // Block movement operations are available via MutableBlockDataSource
 
     /// Compile a PRQL query with render() into SQL and UI specification
     ///
@@ -161,7 +141,7 @@ impl RenderEngine {
         table_name: &str,
     ) -> Result<()> {
         match expr {
-            query_render::RenderExpr::FunctionCall { name: _, args, operations } => {
+            query_render::RenderExpr::FunctionCall { name: _, args, operations: _ } => {
                 // Extract available columns from this function call's arguments
                 let _available_args = self.extract_available_columns_from_args(args);
 
@@ -271,18 +251,6 @@ impl RenderEngine {
         let backend = self.backend.read().await;
         backend.execute_sql(&sql, params).await
             .map_err(|e| anyhow::anyhow!("SQL execution failed: {}", e))
-    }
-
-    /// Get current UI state
-    pub async fn get_ui_state(&self) -> UiState {
-        self.ui_state.read().await.clone()
-    }
-
-    /// Update UI state
-    pub async fn set_ui_state(&self, state: UiState) -> Result<()> {
-        let mut ui_state = self.ui_state.write().await;
-        *ui_state = state;
-        Ok(())
     }
 
     /// Watch a query for changes via CDC streaming
@@ -399,53 +367,54 @@ impl RenderEngine {
     /// ```
     pub async fn execute_operation(
         &self,
+        entity_name: &str,
         op_name: &str,
         params: StorageEntity,
     ) -> Result<()> {
-        let mut backend = self.backend.write().await;
-        let ui_state = self.ui_state.read().await.clone();
-
-        self.operations
-            .execute(op_name, &params, &ui_state, &mut *backend)
+        // Execute via dispatcher using entity_name
+        let dispatcher = self.dispatcher.read().await;
+        dispatcher
+            .execute_operation(entity_name, op_name, params)
             .await
-            .map_err(|e| anyhow::anyhow!("Operation '{}' failed: {}", op_name, e))
+            .map_err(|e| anyhow::anyhow!("Operation '{}' on entity '{}' failed: {}", op_name, entity_name, e))
     }
 
-    /// Register a custom operation
+    /// Register a custom OperationProvider
     ///
-    /// This allows registering additional operations beyond the defaults.
-    /// Can only be called before the RenderEngine is shared via Arc.
+    /// This allows registering additional operation providers for entity types.
+    /// Operations are automatically discovered via the OperationProvider trait.
     ///
     /// # Example
     /// ```no_run
     /// use std::sync::Arc;
     /// use rusty_knowledge::api::render_engine::RenderEngine;
-    /// use rusty_knowledge::operations::block_ops::UpdateField;
+    /// use rusty_knowledge::core::datasource::OperationProvider;
     ///
     /// # async fn example() -> anyhow::Result<()> {
-    /// let mut engine = RenderEngine::new_in_memory().await?;
+    /// let engine = RenderEngine::new_in_memory().await?;
     ///
-    /// // Register custom operation before sharing
-    /// engine.register_operation(Arc::new(UpdateField))?;
+    /// // Register custom provider
+    /// // engine.register_provider("my-entity", my_provider).await?;
     /// # Ok(())
     /// # }
     /// ```
-    pub fn register_operation(&mut self, operation: Arc<dyn crate::operations::Operation>) -> Result<()> {
-        Arc::get_mut(&mut self.operations)
-            .ok_or_else(|| anyhow::anyhow!("Cannot register operations after RenderEngine is shared"))?
-            .register(operation);
-        Ok(())
-    }
 
-    pub fn available_operations(&self) -> Vec<String> {
-        self.operations.operation_names()
+    pub async fn available_operations(&self, entity_name: &str) -> Vec<String> {
+        let dispatcher = self.dispatcher.read().await;
+        dispatcher
+            .operations()
             .into_iter()
-            .map(|s| s.to_string())
+            .filter(|op| op.entity_name == entity_name)
+            .map(|op| op.name)
             .collect()
     }
 
-    pub fn has_operation(&self, op_name: &str) -> bool {
-        self.operations.has_operation(op_name)
+    pub async fn has_operation(&self, entity_name: &str, op_name: &str) -> bool {
+        let dispatcher = self.dispatcher.read().await;
+        dispatcher
+            .operations()
+            .into_iter()
+            .any(|op| op.entity_name == entity_name && op.name == op_name)
     }
 
     /// Execute a closure with read access to the backend
@@ -473,50 +442,6 @@ impl RenderEngine {
         f(&mut *backend)
     }
 
-    /// Register an OperationProvider for an entity type
-    ///
-    /// This registers a provider (typically a QueryableCache<T>) with the dispatcher.
-    /// The provider will handle operations for the specified entity_name.
-    ///
-    /// # Arguments
-    /// * `entity_name` - Entity identifier (e.g., "todoist-task", "logseq-block")
-    /// * `provider` - The OperationProvider instance to register
-    ///
-    /// # Example
-    /// ```no_run
-    /// use std::sync::Arc;
-    /// use rusty_knowledge::api::render_engine::RenderEngine;
-    /// use rusty_knowledge::api::operation_dispatcher::OperationDispatcher;
-    /// use rusty_knowledge::core::datasource::OperationProvider;
-    ///
-    /// # async fn example() -> anyhow::Result<()> {
-    /// let engine = RenderEngine::new_in_memory().await?;
-    /// // ... create provider ...
-    /// // engine.register_provider("todoist-task".to_string(), provider).await?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn register_provider(
-        &self,
-        entity_name: String,
-        provider: Arc<dyn OperationProvider>,
-    ) -> Result<()> {
-        let mut dispatcher = self.dispatcher.write().await;
-        dispatcher.register(entity_name.clone(), provider);
-        Ok(())
-    }
-
-    /// Unregister an OperationProvider for an entity type
-    ///
-    /// # Arguments
-    /// * `entity_name` - Entity identifier to unregister
-    ///
-    /// # Returns
-    /// `true` if a provider was removed, `false` if no provider was registered
-    pub async fn unregister_provider(&self, entity_name: &str) -> bool {
-        let mut dispatcher = self.dispatcher.write().await;
-        dispatcher.unregister(entity_name)
-    }
 
     /// Map a table name to an entity name
     ///
@@ -593,6 +518,7 @@ impl RenderEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::ui_types::CursorPosition;
     use std::sync::Arc;
 
     #[tokio::test]
@@ -620,26 +546,6 @@ mod tests {
             }
             _ => panic!("Expected function call"),
         }
-    }
-
-    #[tokio::test]
-    async fn test_ui_state_management() {
-        let engine = RenderEngine::new_in_memory().await.unwrap();
-
-        let state = UiState {
-            cursor_pos: Some(CursorPosition {
-                block_id: "block-1".to_string(),
-                offset: 42,
-            }),
-            focused_id: Some("block-1".to_string()),
-        };
-
-        engine.set_ui_state(state.clone()).await.unwrap();
-        let retrieved = engine.get_ui_state().await;
-
-        assert_eq!(retrieved.focused_id, state.focused_id);
-        assert!(retrieved.cursor_pos.is_some());
-        assert_eq!(retrieved.cursor_pos.unwrap().offset, 42);
     }
 
     #[tokio::test]
@@ -737,7 +643,7 @@ mod tests {
         params.insert("field".to_string(), Value::String("completed".to_string()));
         params.insert("value".to_string(), Value::Boolean(true));
 
-        let result = engine.execute_operation("update_field", params).await;
+        let result = engine.execute_operation("blocks", "set_field", params).await;
         assert!(result.is_ok(), "Operation should succeed: {:?}", result);
 
         // Verify the update
@@ -761,7 +667,7 @@ mod tests {
 
         // Try to execute non-existent operation
         let params = HashMap::new();
-        let result = engine.execute_operation("nonexistent", params).await;
+        let result = engine.execute_operation("blocks", "nonexistent", params).await;
 
         assert!(result.is_err(), "Should fail for non-existent operation");
         let error_msg = result.unwrap_err().to_string();
@@ -769,69 +675,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_execute_operation_with_ui_state() {
-        let engine = RenderEngine::new_in_memory().await.unwrap();
-        let backend = engine.backend.write().await;
-
-        // Create test table
-        let conn = backend.get_connection().unwrap();
-        conn.execute(
-            "CREATE TABLE blocks (id TEXT PRIMARY KEY, content TEXT)",
-            ()
-        ).await.unwrap();
-
-        conn.execute(
-            "INSERT INTO blocks (id, content) VALUES ('block-1', 'Original content')",
-            ()
-        ).await.unwrap();
-
-        drop(conn);
-        drop(backend);
-
-        // Set UI state
-        let ui_state = UiState {
-            cursor_pos: Some(CursorPosition {
-                block_id: "block-1".to_string(),
-                offset: 5,
-            }),
-            focused_id: Some("block-1".to_string()),
-        };
-        engine.set_ui_state(ui_state).await.unwrap();
-
-        // Execute operation (registry already initialized in RenderEngine)
-        let mut params = HashMap::new();
-        params.insert("id".to_string(), Value::String("block-1".to_string()));
-        params.insert("field".to_string(), Value::String("content".to_string()));
-        params.insert("value".to_string(), Value::String("Updated content".to_string()));
-
-        let result = engine.execute_operation("update_field", params).await;
-        assert!(result.is_ok());
-
-        // Verify the update
-        let sql = "SELECT content FROM blocks WHERE id = 'block-1'";
-        let results = engine.execute_query(sql.to_string(), HashMap::new()).await.unwrap();
-        assert_eq!(results[0].get("content").unwrap().as_string(), Some("Updated content"));
-
-        // Verify UI state is preserved
-        let final_state = engine.get_ui_state().await;
-        assert_eq!(final_state.focused_id, Some("block-1".to_string()));
-        assert!(final_state.cursor_pos.is_some());
-    }
-
-    #[tokio::test]
     async fn test_register_custom_operation() {
-        use crate::operations::block_ops::UpdateField;
+        let engine = RenderEngine::new_in_memory().await.unwrap();
 
-        let mut engine = RenderEngine::new_in_memory().await.unwrap();
+        // Operations are now provided via OperationProvider implementations
+        // No need to register legacy operations - they're automatically available
+        // via CrudOperationProvider and MutableBlockDataSource traits
 
-        // Register custom operation (UpdateField already registered, but this tests the mechanism)
-        let result = engine.register_operation(Arc::new(UpdateField));
-        assert!(result.is_ok(), "Should be able to register operation before sharing");
-
-        // Try to register after sharing (this should fail)
-        let _engine_arc = Arc::new(engine);
-        // Can't call register_operation on Arc<RenderEngine> - this is intentional
-        // to prevent runtime panics from Arc::get_mut
+        // Verify operations are available
+        let ops = engine.available_operations("blocks").await;
+        assert!(!ops.is_empty(), "Should have operations available");
     }
 
     #[tokio::test]

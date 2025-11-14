@@ -27,6 +27,7 @@ pub mod render_engine;
 pub mod ffi_bridge;
 pub mod operation_dispatcher;
 pub mod streaming;
+pub mod ui_types;
 
 #[cfg(test)]
 mod tests;
@@ -47,10 +48,11 @@ pub use types::{
 pub use streaming::{Change, ChangeOrigin, StreamPosition};
 
 // Re-export render engine types for FFI
-pub use render_engine::{RenderEngine, UiState, CursorPosition, RowEvent};
+pub use render_engine::{RenderEngine, RowEvent};
+pub use ui_types::{UiState, CursorPosition};
 pub use ffi_bridge::{
     init_render_engine, compile_query, execute_query, watch_query,
-    execute_operation, set_ui_state, get_ui_state,
+    execute_operation,
 };
 pub use operation_dispatcher::OperationDispatcher;
 

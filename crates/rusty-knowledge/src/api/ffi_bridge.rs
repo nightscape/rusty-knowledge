@@ -3,7 +3,8 @@ use std::sync::Arc;
 use anyhow::{Result, anyhow};
 use tokio::sync::RwLock;
 
-use crate::api::render_engine::{RenderEngine, UiState};
+use crate::api::render_engine::RenderEngine;
+use crate::api::ui_types::UiState;
 use crate::storage::turso::RowChangeStream;
 use crate::storage::types::{Value, StorageEntity};
 use query_render::RenderSpec;
@@ -69,29 +70,6 @@ pub async fn execute_operation(
     Err(anyhow!("Operations not yet implemented - coming in Phase 3.1"))
 }
 
-/// Update the UI state (cursor position, focused block)
-///
-/// # FFI Function
-/// This is exposed to Flutter via flutter_rust_bridge
-pub async fn set_ui_state(
-    engine: Arc<RwLock<RenderEngine>>,
-    ui_state: UiState,
-) -> Result<()> {
-    let engine = engine.read().await;
-    engine.set_ui_state(ui_state).await
-}
-
-/// Get the current UI state
-///
-/// # FFI Function
-/// This is exposed to Flutter via flutter_rust_bridge
-pub async fn get_ui_state(
-    engine: Arc<RwLock<RenderEngine>>,
-) -> Result<UiState> {
-    let engine = engine.read().await;
-    Ok(engine.get_ui_state().await)
-}
-
 /// Watch a SQL query for changes via CDC streaming
 ///
 /// # FFI Function
@@ -138,21 +116,6 @@ mod tests {
         assert!(sql.contains("FROM"));
     }
 
-    #[tokio::test]
-    async fn test_ui_state_operations() {
-        let engine = RenderEngine::new_in_memory().await.unwrap();
-        let engine = Arc::new(RwLock::new(engine));
-
-        let state = UiState {
-            cursor_pos: None,
-            focused_id: Some("test-block".to_string()),
-        };
-
-        set_ui_state(engine.clone(), state.clone()).await.unwrap();
-        let retrieved = get_ui_state(engine).await.unwrap();
-
-        assert_eq!(retrieved.focused_id, state.focused_id);
-    }
 
     #[tokio::test]
     async fn test_execute_operation_not_implemented() {

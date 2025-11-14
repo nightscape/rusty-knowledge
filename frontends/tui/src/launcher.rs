@@ -5,6 +5,8 @@ use tokio::sync::RwLock;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use rusty_knowledge::api::render_engine::RenderEngine;
+use rusty_knowledge::di;
+use ferrous_di::{ServiceCollection, ServiceProvider, Resolver};
 
 pub async fn run_app(db_path: PathBuf, keybindings_path: Option<PathBuf>) -> CommonResult<()> {
     let app = AppMain::new_boxed();
@@ -12,18 +14,30 @@ pub async fn run_app(db_path: PathBuf, keybindings_path: Option<PathBuf>) -> Com
     // Check if database file exists
     let db_exists = db_path.exists();
 
-    // Initialize RenderEngine with file-based database
-    let mut engine = if db_exists {
-        // File exists - use it as-is without running DDLs or inserting data
-        RenderEngine::new(db_path.clone())
-            .await
-            .map_err(|e| miette::miette!("Failed to initialize RenderEngine with existing database: {}", e))?
-    } else {
-        // File doesn't exist - create it and populate with example data
-        let engine = RenderEngine::new(db_path.clone())
-            .await
-            .map_err(|e| miette::miette!("Failed to initialize RenderEngine: {}", e))?;
+    // Set up dependency injection container
+    let mut services = ServiceCollection::new();
+    di::register_core_services(&mut services, db_path.clone())
+        .map_err(|e| miette::miette!("Failed to register core services: {}", e))?;
 
+    // Register Todoist services if API key is available
+    let todoist_api_key = std::env::var("TODOIST_API_KEY").ok();
+    if let Some(ref api_key) = todoist_api_key {
+        use rusty_knowledge_todoist::TodoistClient;
+        let api_key_clone = api_key.clone();
+        services.add_singleton_factory::<Arc<TodoistClient>, _>(move |_resolver| {
+            Arc::new(TodoistClient::new(&api_key_clone))
+        });
+    }
+
+    let provider = services.build();
+
+    // Resolve RenderEngine from DI container (as Arc<RwLock<RenderEngine>>)
+    // ferrous-di wraps services in Arc, so we get Arc<Arc<RwLock<RenderEngine>>>
+    let engine_arc_arc = provider.get_required::<Arc<RwLock<RenderEngine>>>();
+    let engine = (*engine_arc_arc).clone(); // Extract inner Arc<RwLock<RenderEngine>>
+
+    // Initialize database schema and sample data if needed
+    if !db_exists {
         // Create blocks table schema
         let create_table_sql = r#"
             CREATE TABLE IF NOT EXISTS blocks (
@@ -40,9 +54,12 @@ pub async fn run_app(db_path: PathBuf, keybindings_path: Option<PathBuf>) -> Com
             )
         "#;
 
-        engine.execute_query(create_table_sql.to_string(), HashMap::new())
-            .await
-            .map_err(|e| miette::miette!("Failed to create blocks table: {}", e))?;
+        {
+            let engine_guard = engine.write().await;
+            engine_guard.execute_query(create_table_sql.to_string(), HashMap::new())
+                .await
+                .map_err(|e| miette::miette!("Failed to create blocks table: {}", e))?;
+        }
 
         // Generate proper fractional index keys for sample data
         // Using loro_fractional_index to generate valid keys
@@ -72,44 +89,47 @@ pub async fn run_app(db_path: PathBuf, keybindings_path: Option<PathBuf>) -> Com
                 ('root-2', NULL, 0, '{}', 'Second top-level block', 'heading', 0)
         "#, root_1_key, child_1_key, child_2_key, grandchild_1_key, root_2_key);
 
-        engine.execute_query(sample_data_sql.to_string(), HashMap::new())
-            .await
-            .map_err(|e| miette::miette!("Failed to insert sample data: {}", e))?;
-
-        engine
-    };
+        {
+            let engine_guard = engine.write().await;
+            engine_guard.execute_query(sample_data_sql.to_string(), HashMap::new())
+                .await
+                .map_err(|e| miette::miette!("Failed to insert sample data: {}", e))?;
+        }
+    }
 
     // Initialize Todoist integration (only instantiation is Todoist-specific)
     // After this, everything uses generic interfaces
-    let todoist_enabled = if let Ok(api_key) = std::env::var("TODOIST_API_KEY") {
+    let todoist_enabled = if let Some(api_key) = todoist_api_key {
         use rusty_knowledge_todoist::{TodoistClient, TodoistSyncProvider};
         use rusty_knowledge_todoist::todoist_datasource::TodoistTaskDataSource;
         use rusty_knowledge::core::queryable_cache::QueryableCache;
         use rusty_knowledge::core::datasource::{DataSource, OperationProvider};
         use std::sync::Arc;
         use tokio::sync::Mutex;
-        
+
         // Create Todoist-specific components
         // For MVP: Create two instances - one for datasource, one for sync registration
         // TODO: Refactor to share a single instance properly (requires TodoistTaskDataSource changes)
-        let client1 = TodoistClient::new(&api_key);
-        let sync_provider_for_datasource = Arc::new(TodoistSyncProvider::new(client1).build());
-        
-        let client2 = TodoistClient::new(&api_key);
-        let sync_provider_concrete = TodoistSyncProvider::new(client2).build();
-        
+        // Note: We still create providers manually because they need to be mutable for sync()
+        // and we need separate instances for stream subscription
+        let sync_provider_for_datasource = Arc::new(TodoistSyncProvider::from_api_key(&api_key).build());
+        let sync_provider_concrete = TodoistSyncProvider::from_api_key(&api_key).build();
+
         // CRITICAL: Subscribe to the registered provider's stream BEFORE wrapping it
         // This allows us to wire up the stream to update the cache
         let rx_registered = sync_provider_concrete.subscribe_tasks();
         let sync_provider_for_registration = Arc::new(Mutex::new(sync_provider_concrete));
-        
+
         // Create datasource that implements ChangeNotifications<TodoistTask>
         // Note: QueryableCache expects a concrete type, not Arc<dyn DataSource<T>>
         let datasource = TodoistTaskDataSource::new(sync_provider_for_datasource);
-        
+
         // Get RenderEngine's backend (for sharing with QueryableCache)
-        let backend = engine.get_backend();
-        
+        let backend = {
+            let engine_guard = engine.read().await;
+            engine_guard.get_backend()
+        };
+
         // Create QueryableCache using RenderEngine's backend
         // Pass the concrete datasource directly, not wrapped in Arc
         let cache = Arc::new(
@@ -120,7 +140,7 @@ pub async fn run_app(db_path: PathBuf, keybindings_path: Option<PathBuf>) -> Com
             .await
             .map_err(|e| miette::miette!("Failed to create Todoist cache: {}", e))?
         );
-        
+
         // CRITICAL: Wire up the registered provider's stream to update the cache
         // When sync is triggered via 'r', the registered provider emits changes that need to be written to the database
         // We spawn a background task that watches the registered provider's stream and updates the cache
@@ -131,15 +151,15 @@ pub async fn run_app(db_path: PathBuf, keybindings_path: Option<PathBuf>) -> Com
             use rusty_knowledge::core::HasSchema;
             use tokio_stream::wrappers::BroadcastStream;
             use tokio_stream::StreamExt;
-            
+
             let cache_clone = cache.clone();
             let backend_clone = backend.clone();
-            
+
             tokio::spawn(async move {
                 tracing::info!("[StreamHandler] Starting stream handler for registered provider");
                 // Convert broadcast receiver to stream
                 let mut stream = BroadcastStream::new(rx_registered);
-                
+
                 while let Some(result) = stream.next().await {
                     match result {
                         Ok(changes) => {
@@ -177,13 +197,16 @@ pub async fn run_app(db_path: PathBuf, keybindings_path: Option<PathBuf>) -> Com
                 tracing::warn!("[StreamHandler] Stream handler exited (stream closed)");
             });
         }
-        
+
         // Register syncable provider (wrapped in Arc<Mutex<...>>)
-        engine.register_syncable_provider("todoist".to_string(), sync_provider_for_registration.clone() as Arc<Mutex<dyn rusty_knowledge::core::datasource::SyncableProvider>>).await;
-        
-        // Map table to entity
-        engine.map_table_to_entity("todoist_tasks".to_string(), "todoist-task".to_string()).await;
-        
+        {
+            let mut engine_guard = engine.write().await;
+            engine_guard.register_syncable_provider("todoist".to_string(), sync_provider_for_registration.clone() as Arc<Mutex<dyn rusty_knowledge::core::datasource::SyncableProvider>>).await;
+
+            // Map table to entity
+            engine_guard.map_table_to_entity("todoist_tasks".to_string(), "todoist-task".to_string()).await;
+        }
+
         // Initial sync to populate cache
         // NOTE: We sync the datasource's provider first, then call cache.sync() to populate the cache
         // The cache.sync() calls source.get_all() which fetches tasks from Todoist API
@@ -196,22 +219,22 @@ pub async fn run_app(db_path: PathBuf, keybindings_path: Option<PathBuf>) -> Com
             let mut temp_provider = TodoistSyncProvider::new(TodoistClient::new(&api_key)).build();
             temp_provider.sync().await
                 .map_err(|e| miette::miette!("Failed to initial Todoist sync: {}", e))?;
-            
+
             // Also sync the registered provider so manual syncs work
             let mut provider_mut = sync_provider_for_registration.lock().await;
             provider_mut.sync().await
                 .map_err(|e| miette::miette!("Failed to sync registered provider: {}", e))?;
         }
-        
+
         // Populate cache from datasource (calls source.get_all() which fetches from Todoist API)
         cache.sync().await
             .map_err(|e| miette::miette!("Failed to sync cache: {}", e))?;
-        
+
         // TODO: QueryableCache needs to implement OperationProvider
         // For now, skip registration until we implement OperationProvider for QueryableCache
         // engine.register_provider("todoist-task".to_string(), cache.clone() as Arc<dyn OperationProvider>).await
         //     .map_err(|e| miette::miette!("Failed to register Todoist provider: {}", e))?;
-        
+
         true
     } else {
         false
@@ -258,12 +281,12 @@ render (list hierarchical_sort:[parent_id, sort_key] item_template:(row (checkbo
     let params = HashMap::new();
 
     // Query and set up CDC streaming
-    let (render_spec, initial_data, cdc_stream) = engine
-        .query_and_watch(prql_query, params)
-        .await
-        .map_err(|e| miette::miette!("Failed to query blocks: {}", e))?;
-
-    let engine = Arc::new(RwLock::new(engine));
+    let (render_spec, initial_data, cdc_stream) = {
+        let mut engine_guard = engine.write().await;
+        engine_guard.query_and_watch(prql_query, params)
+            .await
+            .map_err(|e| miette::miette!("Failed to query blocks: {}", e))?
+    };
 
     // Load keybindings configuration
     let keybindings = if let Some(ref path) = keybindings_path {
