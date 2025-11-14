@@ -26,9 +26,9 @@ impl TodoistClient {
                 .expect("Invalid API key format"),
         );
 
-        // Create client with 5 second timeout
+        // Create client with 30 second timeout (increased for slow networks)
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(5))
+            .timeout(std::time::Duration::from_secs(30))
             .build()
             .expect("Failed to create HTTP client");
 

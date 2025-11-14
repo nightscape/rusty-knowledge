@@ -1,6 +1,7 @@
 pub mod adapter;
 pub mod api;
 pub mod core;
+pub mod di;
 pub mod operations;
 pub mod references;
 pub mod storage;

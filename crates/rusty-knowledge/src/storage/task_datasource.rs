@@ -29,14 +29,6 @@ impl InMemoryTaskStore {
         }
     }
 
-    pub fn with_tasks(tasks: Vec<Task>) -> Self {
-        Self {
-            tasks: Arc::new(RwLock::new(tasks)),
-            version: Arc::new(AtomicU64::new(0)),
-            change_senders: Arc::new(RwLock::new(Vec::new())),
-        }
-    }
-
     /// Emit a change to all subscribers
     fn emit_change(&self, change: Change<Task>) {
         self.version.fetch_add(1, Ordering::SeqCst);

@@ -264,7 +264,7 @@ fn parse_provider_name(attr: &TokenStream) -> Option<String> {
     if attr.is_empty() {
         return None;
     }
-    
+
     let attr_str = attr.to_string();
     // Look for provider_name = "value" pattern
     if let Some(start) = attr_str.find("provider_name") {
@@ -428,7 +428,7 @@ fn to_display_name(s: &str) -> String {
 #[proc_macro_attribute]
 pub fn operations_trait(attr: TokenStream, item: TokenStream) -> TokenStream {
     let trait_def = parse_macro_input!(item as ItemTrait);
-    
+
     // Parse provider_name from attribute: #[operations_trait(provider_name = "todoist")]
     let provider_name = parse_provider_name(&attr);
 

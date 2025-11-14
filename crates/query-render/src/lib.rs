@@ -112,7 +112,7 @@ fn annotate_tree_with_operations(expr: &mut RenderExpr, table_name: &str) {
 
                     // If the column reference uses "this." prefix, it's a direct column reference
                     // NOTE: This is legacy auto-operation code. In the new architecture, operations
-                    // are discovered via OperationProvider during compile_query() in RenderEngine.
+                    // are discovered via OperationProvider during compile_query() in BackendEngine.
                     // This creates a placeholder descriptor - real operations should come from OperationProvider.
                     if col_name.starts_with("this.") {
                         operations.push(OperationWiring {

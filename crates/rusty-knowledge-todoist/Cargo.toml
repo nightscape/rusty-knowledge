@@ -16,6 +16,7 @@ futures = "0.3"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.0", features = ["v4", "serde"] }
 tracing = "0.1"
+ferrous-di = { path = "/Users/martin/Workspaces/rust/ferrous-di", features = ["async"] }
 
 # Local dependencies
 rusty-knowledge = { path = "../rusty-knowledge" }

@@ -4,6 +4,7 @@ pub mod predicate;
 pub mod projections;
 pub mod queryable_cache;
 pub mod stream_cache;
+pub mod stream_registry;
 pub mod traits;
 pub mod unified_query;
 pub mod updates;
@@ -17,7 +18,8 @@ pub use predicate::{AlwaysTrue, Eq, Gt, IsNull, Lt};
 pub use projections::{Block, BlockAdapter, Blocklike};
 pub use queryable_cache::QueryableCache;
 pub use stream_cache::QueryableCache as StreamCache;
-pub use datasource::DataSource;
+pub use stream_registry::StreamRegistry;
+pub use datasource::{DataSource, StreamProvider};
 pub use traits::{
     And, FieldSchema, HasSchema, Lens, Not, Or, Predicate, Queryable, Schema,
     SqlPredicate,

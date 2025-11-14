@@ -19,6 +19,7 @@ pub mod datasource;
 pub mod models;
 pub mod todoist_datasource;
 pub mod todoist_sync_provider;
+pub mod di;
 
 // OperationProvider wrappers for generic testing
 pub mod provider_wrapper;
@@ -44,6 +45,7 @@ pub use client::TodoistClient;
 pub use converters::*;
 pub use datasource::*;
 pub use models::*;
-pub use todoist_sync_provider::{TodoistSyncProvider, TodoistSyncProviderBuilder};
+pub use todoist_sync_provider::TodoistSyncProvider;
 pub use provider_wrapper::TodoistOperationProvider;
 pub use fake_wrapper::TodoistFakeOperationProvider;
+pub use di::{TodoistModule, TodoistConfig};

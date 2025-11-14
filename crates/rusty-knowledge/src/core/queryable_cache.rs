@@ -1,15 +1,16 @@
 use async_trait::async_trait;
 use std::marker::PhantomData;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, broadcast};
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio_stream::Stream;
+use tracing;
 
 use super::entity::Entity;
 use super::traits::{HasSchema, Predicate, Queryable, Result, Schema};
-use super::datasource::{DataSource, CrudOperationProvider};
+use super::datasource::{DataSource, CrudOperationProvider, OperationProvider, OperationRegistry, OperationDescriptor};
 use crate::storage::types::Value;
 use crate::storage::turso::TursoBackend;
 use crate::api::streaming::{ChangeNotifications, Change, StreamPosition};
@@ -37,7 +38,7 @@ where
 {
     /// Create QueryableCache with TursoBackend
     ///
-    /// The backend is shared with RenderEngine to enable CDC streaming.
+    /// The backend is shared with BackendEngine to enable CDC streaming.
     pub async fn new_with_backend(source: S, backend: Arc<RwLock<TursoBackend>>) -> Result<Self> {
         let cache = Self {
             source: Arc::new(source),
@@ -49,7 +50,7 @@ where
         cache.initialize_schema().await?;
         Ok(cache)
     }
-    
+
     // Keep old methods for backward compatibility during transition
     #[allow(dead_code)]
     pub async fn new(source: S) -> Result<Self> {
@@ -60,7 +61,7 @@ where
         ));
         Self::new_with_backend(source, backend).await
     }
-    
+
     #[allow(dead_code)]
     pub async fn with_database(source: S, db_path: &str) -> Result<Self> {
         let backend = Arc::new(RwLock::new(
@@ -205,6 +206,156 @@ where
         Ok(())
     }
 
+    /// Wire up stream ingestion from a broadcast receiver (spawns background task)
+    ///
+    /// This method subscribes to a broadcast channel and updates the local cache
+    /// as changes arrive from the provider. The background task runs until the
+    /// stream is closed or the cache is dropped.
+    /// ExternalServiceDiscovery
+    pub fn ingest_stream(&self, rx: broadcast::Receiver<Vec<Change<T>>>)
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        let backend = Arc::clone(&self.backend);
+        let schema = T::schema();
+        let table_name = schema.table_name.clone();
+        let id_field = schema
+            .fields
+            .iter()
+            .find(|f| f.primary_key)
+            .map(|f| f.name.clone())
+            .unwrap_or_else(|| "id".to_string());
+
+        // Spawn the ingestion task on the current runtime
+        // IMPORTANT: This must be called from an async context on a runtime that stays alive
+        // If called from a blocking thread with a temporary runtime, the task will be dropped
+        // when that runtime is dropped. The caller should ensure this is called from a persistent runtime.
+        tokio::spawn(async move {
+            let mut rx = rx;
+            tracing::info!("[QueryableCache] Started ingesting stream for table: {}", table_name);
+            loop {
+                match rx.recv().await {
+                    Ok(changes) => {
+                        tracing::info!("[QueryableCache] Received {} changes for table: {}", changes.len(), table_name);
+                        for change in changes {
+                            match change {
+                                Change::Created { data, .. } | Change::Updated { data, .. } => {
+                                    // Upsert to cache
+                                    tracing::debug!("[QueryableCache] Upserting change to table: {}, id_field: {}", table_name, id_field);
+                                    if let Err(e) = Self::apply_change_to_cache(
+                                        &backend,
+                                        &table_name,
+                                        &id_field,
+                                        &data,
+                                    ).await {
+                                        tracing::error!("[QueryableCache] Error ingesting change into cache: {}", e);
+                                    } else {
+                                        tracing::debug!("[QueryableCache] Successfully upserted change to table: {}", table_name);
+                                    }
+                                }
+                                Change::Deleted { id, .. } => {
+                                    if let Err(e) = Self::delete_from_cache_internal(
+                                        &backend,
+                                        &table_name,
+                                        &id_field,
+                                        &id,
+                                    ).await {
+                                        tracing::error!("Error deleting from cache: {}", e);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!("Stream lagged by {} messages, triggering resync", n);
+                        // TODO: Trigger full resync
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        tracing::info!("Change stream closed");
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    // Helper method for applying changes to cache
+    // ExternalServiceDiscovery
+    async fn apply_change_to_cache(
+        backend: &Arc<RwLock<TursoBackend>>,
+        table_name: &str,
+        id_field: &str,
+        item: &T,
+    ) -> Result<()>
+    where
+        T: HasSchema + Clone,
+    {
+        let backend_guard = backend.read().await;
+        let conn = backend_guard.get_connection()
+            .map_err(|e| format!("Failed to get connection: {}", e))?;
+        let entity = item.to_entity();
+        let schema = T::schema();
+
+        let mut columns = Vec::new();
+        let mut placeholders = Vec::new();
+        let mut values = Vec::new();
+
+        for field in &schema.fields {
+            if let Some(value) = entity.fields.get(&field.name) {
+                columns.push(field.name.clone());
+                placeholders.push("?");
+
+                let libsql_value = match value {
+                    super::value::Value::String(s) => turso::Value::Text(s.clone()),
+                    super::value::Value::Integer(i) => turso::Value::Integer(*i),
+                    super::value::Value::Float(f) => turso::Value::Real(*f),
+                    super::value::Value::Boolean(b) => turso::Value::Integer(if *b { 1 } else { 0 }),
+                    super::value::Value::Null => turso::Value::Null,
+                    _ => turso::Value::Null,
+                };
+                values.push(libsql_value);
+            }
+        }
+
+        let update_clause = columns
+            .iter()
+            .map(|c| format!("{} = excluded.{}", c, c))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let sql = format!(
+            "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT({}) DO UPDATE SET {}",
+            table_name,
+            columns.join(", "),
+            placeholders.join(", "),
+            id_field,
+            update_clause
+        );
+
+        conn.execute(&sql, turso::params_from_iter(values)).await
+            .map_err(|e| format!("Failed to execute upsert: {}", e))?;
+        Ok(())
+    }
+
+    // Helper method for deleting from cache
+    // ExternalServiceDiscovery
+    async fn delete_from_cache_internal(
+        backend: &Arc<RwLock<TursoBackend>>,
+        table_name: &str,
+        id_field: &str,
+        id: &str,
+    ) -> Result<()> {
+        let backend_guard = backend.read().await;
+        let conn = backend_guard.get_connection()
+            .map_err(|e| format!("Failed to get connection: {}", e))?;
+
+        let sql = format!("DELETE FROM {} WHERE {} = ?", table_name, id_field);
+        conn.execute(&sql, [turso::Value::Text(id.to_string())]).await
+            .map_err(|e| format!("Failed to execute delete: {}", e))?;
+
+        Ok(())
+    }
+
     fn row_to_entity(&self, row: &turso::Row, schema: &Schema) -> Result<Entity> {
         let mut entity = Entity::new(&schema.table_name);
 
@@ -281,6 +432,89 @@ where
     }
 }
 
+// Implement OperationProvider for QueryableCache
+// This enables QueryableCache to be registered with OperationDispatcher
+#[async_trait]
+impl<S, T> OperationProvider for QueryableCache<S, T>
+where
+    S: DataSource<T> + CrudOperationProvider<T>,
+    T: HasSchema + Send + Sync + 'static + OperationRegistry,
+{
+    fn operations(&self) -> Vec<OperationDescriptor> {
+        // Delegate to OperationRegistry for the entity type
+        T::all_operations()
+    }
+
+    async fn execute_operation(
+        &self,
+        entity_name: &str,
+        op_name: &str,
+        params: StorageEntity,
+    ) -> Result<()> {
+        // Validate entity name matches the registry
+        let expected_entity_name = T::entity_name();
+        if entity_name != expected_entity_name {
+            return Err(format!(
+                "Expected entity_name '{}', got '{}'",
+                expected_entity_name, entity_name
+            ).into());
+        }
+
+        // Dispatch to CrudOperationProvider methods
+        match op_name {
+            "set_field" => {
+                let id = params.get("id")
+                    .and_then(|v| v.as_string())
+                    .ok_or_else(|| "Missing 'id' parameter".to_string())?;
+                let field = params.get("field")
+                    .and_then(|v| v.as_string())
+                    .ok_or_else(|| "Missing 'field' parameter".to_string())?;
+                let value = params.get("value")
+                    .ok_or_else(|| "Missing 'value' parameter".to_string())?
+                    .clone();
+                self.set_field(&id, &field, value).await
+            }
+            "create" => {
+                // Create expects fields as params (excluding id which is generated)
+                let id = self.create(params).await?;
+                Ok(())
+            }
+            "delete" => {
+                let id = params.get("id")
+                    .and_then(|v| v.as_string())
+                    .ok_or_else(|| "Missing 'id' parameter".to_string())?;
+                self.delete(&id).await
+            }
+            _ => {
+                // Try dispatching to trait methods via generated dispatch functions
+                // This handles operations from MutableBlockDataSource, MutableTaskDataSource, etc.
+                use super::datasource::__operations_crud_operation_provider;
+
+                // Try CrudOperationProvider operations first
+                let result = __operations_crud_operation_provider::dispatch_operation(
+                    self.source.as_ref(),
+                    op_name,
+                    &params,
+                ).await;
+
+                if result.is_ok() {
+                    return result;
+                }
+
+                // For other operations (from MutableBlockDataSource, MutableTaskDataSource, etc.),
+                // we need to check if T implements the required traits.
+                // Since we can't conditionally compile based on trait bounds, we'll try to
+                // dispatch through the source datasource if it implements OperationProvider.
+                // Otherwise, return an error indicating the operation is not supported.
+                Err(format!(
+                    "Operation '{}' is not supported for entity '{}'",
+                    op_name, entity_name
+                ).into())
+            }
+        }
+    }
+}
+
 #[async_trait]
 impl<S, T> Queryable<T> for QueryableCache<S, T>
 where
@@ -349,11 +583,11 @@ where
     ) -> Pin<Box<dyn Stream<Item = std::result::Result<Vec<Change<StorageEntity>>, ApiError>> + Send>> {
         // IMPORTANT: No auto-sync here - caller must sync first
         // This allows offline startup without sync attempts
-        
+
         let schema = T::schema();
         let table_name = schema.table_name.clone();
         let backend = self.backend.read().await;
-        
+
         // Get CDC stream from TursoBackend
         let (cdc_conn, row_change_stream) = match backend.row_changes() {
             Ok(result) => result,
@@ -363,36 +597,36 @@ where
                 return Box::pin(tokio_stream::once(Err(error)));
             }
         };
-        
+
         // Store connection to keep it alive for CDC callbacks
         // CRITICAL: The connection MUST stay alive for the callback closure to stay alive
         // The callback closure captures the channel sender (tx), which closes the stream if dropped
         // We keep it in an Arc<Mutex> and move it into the stream state
         let conn_guard = Arc::new(tokio::sync::Mutex::new(cdc_conn));
-        
+
         // TODO: Option A - Filter stream for this table and convert RowChange to Change<StorageEntity>
         // This is inefficient when multiple QueryableCache instances share the same backend.
         // Consider optimizing to Option B (table-specific subscriptions) in the future.
         use tokio_stream::StreamExt;
         use crate::storage::turso::{RowChange, ChangeData};
-        
+
         // Create a wrapper stream that holds the connection to keep it alive
         // The connection must stay alive for CDC callbacks to work
         let table_name_clone = table_name.clone();
-        
+
         // Use a custom stream wrapper that holds the connection
         // This ensures the connection stays alive for the lifetime of the stream
         struct ConnectionStream<S> {
             _conn: Arc<tokio::sync::Mutex<turso::Connection>>,
             stream: S,
         }
-        
+
         impl<S> Stream for ConnectionStream<S>
         where
             S: Stream + Unpin,
         {
             type Item = S::Item;
-            
+
             fn poll_next(
                 mut self: Pin<&mut Self>,
                 cx: &mut Context<'_>,
@@ -400,12 +634,12 @@ where
                 Pin::new(&mut self.stream).poll_next(cx)
             }
         }
-        
+
         let wrapped_stream = ConnectionStream {
             _conn: conn_guard,
             stream: row_change_stream,
         };
-        
+
         let filtered_stream = wrapped_stream
             .filter(move |row_change: &RowChange| {
                 row_change.relation_name == table_name_clone
@@ -415,7 +649,7 @@ where
                 // StorageEntity is HashMap<String, Value>, so we can use data directly
                 match row_change.change {
                     ChangeData::Created { data, origin } => {
-                        Ok(vec![Change::Created { 
+                        Ok(vec![Change::Created {
                             data, // data is already HashMap<String, Value> = StorageEntity
                             origin,
                         }])
@@ -443,10 +677,10 @@ where
                     }
                 }
             });
-        
+
         Box::pin(filtered_stream)
     }
-    
+
     async fn get_current_version(&self) -> std::result::Result<Vec<u8>, ApiError> {
         // Return empty version vector for now
         // Could be enhanced to track sync tokens
@@ -589,7 +823,10 @@ mod tests {
     async fn test_queryable_cache_creation() {
         let source = InMemoryDataSource::new();
         let cache = QueryableCache::new(source).await.unwrap();
-        assert!(cache.db.read().await.is_none());
+        // Verify backend exists and can get a connection
+        let backend = cache.backend.read().await;
+        let conn = backend.get_connection();
+        assert!(conn.is_ok());
     }
 
     #[tokio::test]
@@ -598,7 +835,10 @@ mod tests {
         let cache = QueryableCache::with_database(source, ":memory:")
             .await
             .unwrap();
-        assert!(cache.db.read().await.is_some());
+        // Verify backend exists and can get a connection
+        let backend = cache.backend.read().await;
+        let conn = backend.get_connection();
+        assert!(conn.is_ok());
     }
 
     #[tokio::test]

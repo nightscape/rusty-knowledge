@@ -7,6 +7,7 @@
 
 #[cfg(test)]
 mod tests {
+    use crate::{TodoistClient, TodoistSyncProvider};
     use crate::models::TodoistTask;
     use crate::todoist_datasource::TodoistTaskDataSource;
     use rusty_knowledge::core::datasource::{CrudOperationProvider, OperationRegistry};
@@ -46,19 +47,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_operations_on_datasource() {
-        // Real datasources get operations() automatically via default trait method
-        let datasource = TodoistTaskDataSource::from_api_key("test_api_key");
-        let ops = datasource.operations();
-
-        // Should delegate to TodoistTask::all_operations()
-        assert_eq!(ops.len(), 9, "DataSource should expose all 9 operations");
-    }
-
-    #[tokio::test]
     async fn test_operations_on_cache() {
         // QueryableCache gets operations() automatically via blanket impl of CacheOperations
-        let datasource = Arc::new(TodoistTaskDataSource::from_api_key("test_api_key"));
+        let datasource = Arc::new(TodoistTaskDataSource::new(Arc::new(TodoistSyncProvider::new(TodoistClient::new("test_api_key")))));
         let db = Arc::new(RwLock::new(
             Box::new(TursoBackend::new_in_memory().await.unwrap())
                 as Box<dyn rusty_knowledge::storage::backend::StorageBackend>

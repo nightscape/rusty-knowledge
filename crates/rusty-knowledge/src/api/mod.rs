@@ -7,7 +7,7 @@
 //!
 //! - `types`: Core data types (Block, InitialState, ApiError, etc.)
 //! - `repository`: DocumentRepository trait defining backend operations
-//! - `render_engine`: PRQL render engine for reactive UI (Phase 4.1)
+//! - `backend_engine`: PRQL render engine for reactive UI (Phase 4.1)
 //! - `ffi_bridge`: FFI functions exposed to Flutter (Phase 4.1)
 //!
 //! # Design Principles
@@ -23,10 +23,11 @@ pub mod pbt_infrastructure;
 pub mod repository;
 pub mod types;
 
-pub mod render_engine;
+pub mod backend_engine;
 pub mod ffi_bridge;
 pub mod operation_dispatcher;
 pub mod streaming;
+pub mod ui_types;
 
 #[cfg(test)]
 mod tests;
@@ -47,10 +48,11 @@ pub use types::{
 pub use streaming::{Change, ChangeOrigin, StreamPosition};
 
 // Re-export render engine types for FFI
-pub use render_engine::{RenderEngine, UiState, CursorPosition, RowEvent};
+pub use backend_engine::BackendEngine;
+pub use ui_types::{UiState, CursorPosition};
 pub use ffi_bridge::{
     init_render_engine, compile_query, execute_query, watch_query,
-    execute_operation, set_ui_state, get_ui_state,
+    execute_operation,
 };
 pub use operation_dispatcher::OperationDispatcher;
 
