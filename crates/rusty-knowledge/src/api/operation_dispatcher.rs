@@ -224,7 +224,7 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use crate::storage::types::StorageEntity;
-    use query_render::{OperationParam, TypeHint};
+    use query_render::TypeHint;
 
     // Mock OperationProvider for testing
     struct MockProvider {

@@ -7,7 +7,6 @@ use tokio::sync::RwLock;
 use crate::storage::turso::{TursoBackend, RowChangeStream};
 use crate::storage::types::{Value, StorageEntity};
 use crate::api::operation_dispatcher::OperationDispatcher;
-use crate::api::ui_types::UiState;
 use crate::core::datasource::OperationProvider;
 use query_render::RenderSpec;
 
@@ -518,8 +517,125 @@ impl RenderEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::ui_types::CursorPosition;
+    use crate::core::datasource::{OperationProvider, Result as DatasourceResult};
+    use crate::core::datasource::crud_operation_provider_operations;
+    use query_render::OperationDescriptor;
     use std::sync::Arc;
+    use async_trait::async_trait;
+
+    // Simple SQL-based provider for testing
+    struct SqlOperationProvider {
+        backend: Arc<RwLock<TursoBackend>>,
+        table_name: String,
+        entity_name: String,
+    }
+
+    impl SqlOperationProvider {
+        fn new(backend: Arc<RwLock<TursoBackend>>, table_name: String, entity_name: String) -> Self {
+            Self {
+                backend,
+                table_name,
+                entity_name,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl OperationProvider for SqlOperationProvider {
+        fn operations(&self) -> Vec<OperationDescriptor> {
+            crud_operation_provider_operations(&self.entity_name, &self.table_name, "id")
+        }
+
+        async fn execute_operation(
+            &self,
+            entity_name: &str,
+            op_name: &str,
+            params: StorageEntity,
+        ) -> DatasourceResult<()> {
+            if entity_name != self.entity_name {
+                return Err(format!("Expected entity_name '{}', got '{}'", self.entity_name, entity_name).into());
+            }
+
+            match op_name {
+                "set_field" => {
+                    let id = params.get("id")
+                        .and_then(|v| v.as_string())
+                        .ok_or_else(|| "Missing 'id' parameter".to_string())?;
+                    let field = params.get("field")
+                        .and_then(|v| v.as_string())
+                        .ok_or_else(|| "Missing 'field' parameter".to_string())?;
+                    let value = params.get("value")
+                        .ok_or_else(|| "Missing 'value' parameter".to_string())?;
+
+                    let backend = self.backend.write().await;
+                    let conn = backend.get_connection()
+                        .map_err(|e| format!("Failed to get connection: {}", e))?;
+
+                    // Convert value to SQL
+                    let sql_value = match value {
+                        Value::String(s) => format!("'{}'", s.replace("'", "''")),
+                        Value::Integer(i) => i.to_string(),
+                        Value::Boolean(b) => if *b { "1" } else { "0" }.to_string(),
+                        Value::Null => "NULL".to_string(),
+                        Value::DateTime(dt) => format!("'{}'", dt.to_rfc3339()),
+                        Value::Json(j) => format!("'{}'", serde_json::to_string(j).unwrap_or_default().replace("'", "''")),
+                        Value::Reference(r) => format!("'{}'", r.replace("'", "''")),
+                    };
+
+                    let sql = format!("UPDATE {} SET {} = {} WHERE id = '{}'",
+                        self.table_name, field, sql_value, id.replace("'", "''"));
+                    conn.execute(&sql, ()).await
+                        .map_err(|e| format!("Failed to execute SQL: {}", e))?;
+                    Ok(())
+                }
+                "create" => {
+                    let backend = self.backend.write().await;
+                    let conn = backend.get_connection()
+                        .map_err(|e| format!("Failed to get connection: {}", e))?;
+
+                    let mut columns = Vec::new();
+                    let mut values = Vec::new();
+                    for (key, value) in params.iter() {
+                        columns.push(key.clone());
+                        let sql_value = match value {
+                            Value::String(s) => format!("'{}'", s.replace("'", "''")),
+                            Value::Integer(i) => i.to_string(),
+                            Value::Boolean(b) => if *b { "1" } else { "0" }.to_string(),
+                            Value::Null => "NULL".to_string(),
+                            Value::DateTime(dt) => format!("'{}'", dt.to_rfc3339()),
+                            Value::Json(j) => format!("'{}'", serde_json::to_string(j).unwrap_or_default().replace("'", "''")),
+                            Value::Reference(r) => format!("'{}'", r.replace("'", "''")),
+                        };
+                        values.push(sql_value);
+                    }
+
+                    let sql = format!("INSERT INTO {} ({}) VALUES ({})",
+                        self.table_name,
+                        columns.join(", "),
+                        values.join(", "));
+                    conn.execute(&sql, ()).await
+                        .map_err(|e| format!("Failed to execute SQL: {}", e))?;
+                    Ok(())
+                }
+                "delete" => {
+                    let id = params.get("id")
+                        .and_then(|v| v.as_string())
+                        .ok_or_else(|| "Missing 'id' parameter".to_string())?;
+
+                    let backend = self.backend.write().await;
+                    let conn = backend.get_connection()
+                        .map_err(|e| format!("Failed to get connection: {}", e))?;
+
+                    let sql = format!("DELETE FROM {} WHERE id = '{}'",
+                        self.table_name, id.replace("'", "''"));
+                    conn.execute(&sql, ()).await
+                        .map_err(|e| format!("Failed to execute SQL: {}", e))?;
+                    Ok(())
+                }
+                _ => Err(format!("Unknown operation: {}", op_name).into()),
+            }
+        }
+    }
 
     #[tokio::test]
     async fn test_render_engine_creation() {
@@ -636,8 +752,18 @@ mod tests {
         drop(conn);
         drop(backend);
 
+        // Register a provider for the blocks entity
+        let provider = Arc::new(SqlOperationProvider::new(
+            engine.backend.clone(),
+            "blocks".to_string(),
+            "blocks".to_string(),
+        ));
+        {
+            let mut dispatcher = engine.dispatcher.write().await;
+            dispatcher.register("blocks".to_string(), provider);
+        }
+
         // Execute operation to update completed field
-        // Note: No need to set up registry - it's already initialized in RenderEngine!
         let mut params = HashMap::new();
         params.insert("id".to_string(), Value::String("block-1".to_string()));
         params.insert("field".to_string(), Value::String("completed".to_string()));
@@ -678,9 +804,16 @@ mod tests {
     async fn test_register_custom_operation() {
         let engine = RenderEngine::new_in_memory().await.unwrap();
 
-        // Operations are now provided via OperationProvider implementations
-        // No need to register legacy operations - they're automatically available
-        // via CrudOperationProvider and MutableBlockDataSource traits
+        // Register a provider for the blocks entity
+        let provider = Arc::new(SqlOperationProvider::new(
+            engine.backend.clone(),
+            "blocks".to_string(),
+            "blocks".to_string(),
+        ));
+        {
+            let mut dispatcher = engine.dispatcher.write().await;
+            dispatcher.register("blocks".to_string(), provider);
+        }
 
         // Verify operations are available
         let ops = engine.available_operations("blocks").await;

@@ -67,7 +67,12 @@ mod tests {
                     parent_id TEXT,
                     depth INTEGER NOT NULL DEFAULT 0,
                     sort_key TEXT NOT NULL,
-                    content TEXT
+                    content TEXT,
+                    collapsed INTEGER NOT NULL DEFAULT 0,
+                    completed INTEGER NOT NULL DEFAULT 0,
+                    block_type TEXT NOT NULL DEFAULT 'text',
+                    created_at INTEGER NOT NULL DEFAULT 0,
+                    updated_at INTEGER NOT NULL DEFAULT 0
                 )",
                 (),
             )
