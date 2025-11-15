@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use rusty_knowledge::api::render_engine::RenderEngine;
 use rusty_knowledge::di;
-use ferrous_di::{ServiceCollection, ServiceProvider, Resolver};
+use ferrous_di::{ServiceCollection, Resolver, ServiceCollectionModuleExt};
 
 pub async fn run_app(db_path: PathBuf, keybindings_path: Option<PathBuf>) -> CommonResult<()> {
     let app = AppMain::new_boxed();
@@ -16,18 +16,19 @@ pub async fn run_app(db_path: PathBuf, keybindings_path: Option<PathBuf>) -> Com
 
     // Set up dependency injection container
     let mut services = ServiceCollection::new();
+
+    // Register Todoist config if API key is available
+    let todoist_api_key = std::env::var("TODOIST_API_KEY").ok();
+    if let Some(api_key) = &todoist_api_key {
+        services.add_singleton(rusty_knowledge_todoist::di::TodoistConfig::new(Some(api_key.clone())));
+    }
+
+    // Register modules
+    services.add_module_mut(rusty_knowledge_todoist::di::TodoistModule)
+        .map_err(|e| miette::miette!("Failed to register TodoistModule: {}", e))?;
+
     di::register_core_services(&mut services, db_path.clone())
         .map_err(|e| miette::miette!("Failed to register core services: {}", e))?;
-
-    // Register Todoist services if API key is available
-    let todoist_api_key = std::env::var("TODOIST_API_KEY").ok();
-    if let Some(ref api_key) = todoist_api_key {
-        use rusty_knowledge_todoist::TodoistClient;
-        let api_key_clone = api_key.clone();
-        services.add_singleton_factory::<Arc<TodoistClient>, _>(move |_resolver| {
-            Arc::new(TodoistClient::new(&api_key_clone))
-        });
-    }
 
     let provider = services.build();
 
@@ -103,26 +104,26 @@ pub async fn run_app(db_path: PathBuf, keybindings_path: Option<PathBuf>) -> Com
         use rusty_knowledge_todoist::{TodoistClient, TodoistSyncProvider};
         use rusty_knowledge_todoist::todoist_datasource::TodoistTaskDataSource;
         use rusty_knowledge::core::queryable_cache::QueryableCache;
-        use rusty_knowledge::core::datasource::{DataSource, OperationProvider};
+        use rusty_knowledge::core::StreamRegistry;
+        use rusty_knowledge_todoist::models::TodoistTask;
         use std::sync::Arc;
-        use tokio::sync::Mutex;
 
-        // Create Todoist-specific components
-        // For MVP: Create two instances - one for datasource, one for sync registration
-        // TODO: Refactor to share a single instance properly (requires TodoistTaskDataSource changes)
-        // Note: We still create providers manually because they need to be mutable for sync()
-        // and we need separate instances for stream subscription
-        let sync_provider_for_datasource = Arc::new(TodoistSyncProvider::from_api_key(&api_key).build());
-        let sync_provider_concrete = TodoistSyncProvider::from_api_key(&api_key).build();
+        // Get the syncable provider from DI (it was registered above)
+        // Access it through the resolver - ferrous-di wraps in Arc, so we get Arc<Arc<NamedSyncableProvider>>
+        let sync_provider_for_registration = {
+            let named_provider_arc_arc = provider.get_required::<rusty_knowledge::api::operation_dispatcher::NamedSyncableProvider>();
+            // Access the inner Arc<NamedSyncableProvider> and clone it to get the provider
+            let named_provider = (*named_provider_arc_arc).clone();
+            named_provider.provider
+        };
 
-        // CRITICAL: Subscribe to the registered provider's stream BEFORE wrapping it
-        // This allows us to wire up the stream to update the cache
-        let rx_registered = sync_provider_concrete.subscribe_tasks();
-        let sync_provider_for_registration = Arc::new(Mutex::new(sync_provider_concrete));
+        // Create TodoistSyncProvider instance for datasource/stream
+        // We need a separate instance for datasource (not wrapped in Mutex)
+        let sync_provider_for_datasource = Arc::new(TodoistSyncProvider::new(TodoistClient::new(&api_key)));
 
         // Create datasource that implements ChangeNotifications<TodoistTask>
         // Note: QueryableCache expects a concrete type, not Arc<dyn DataSource<T>>
-        let datasource = TodoistTaskDataSource::new(sync_provider_for_datasource);
+        let datasource = TodoistTaskDataSource::new(sync_provider_for_datasource.clone());
 
         // Get RenderEngine's backend (for sharing with QueryableCache)
         let backend = {
@@ -141,92 +142,49 @@ pub async fn run_app(db_path: PathBuf, keybindings_path: Option<PathBuf>) -> Com
             .map_err(|e| miette::miette!("Failed to create Todoist cache: {}", e))?
         );
 
-        // CRITICAL: Wire up the registered provider's stream to update the cache
-        // When sync is triggered via 'r', the registered provider emits changes that need to be written to the database
-        // We spawn a background task that watches the registered provider's stream and updates the cache
+        // Wire up the stream provider to the cache using StreamRegistry
+        // This automatically handles all change ingestion in the background
+        // Note: We register the datasource provider's stream. Manual syncs via the registered
+        // provider will need to trigger cache.sync() separately, or we could register both
+        // streams (but that would cause duplicate updates).
+        StreamRegistry::register_stream_to_cache::<TodoistTask, _, _>(
+            sync_provider_for_datasource.clone(),
+            cache.clone(),
+        )
+        .map_err(|e| miette::miette!("Failed to register stream to cache: {}", e))?;
+
+        tracing::info!("[TodoistIntegration] Registered TodoistTask stream to cache");
+
+        // Syncable provider is already registered in DI, so it's automatically available in the dispatcher
+        // Map table to entity
         {
-            use rusty_knowledge_todoist::models::TodoistTask;
-            use rusty_knowledge::api::streaming::Change;
-            use rusty_knowledge::core::Entity;
-            use rusty_knowledge::core::HasSchema;
-            use tokio_stream::wrappers::BroadcastStream;
-            use tokio_stream::StreamExt;
-
-            let cache_clone = cache.clone();
-            let backend_clone = backend.clone();
-
-            tokio::spawn(async move {
-                tracing::info!("[StreamHandler] Starting stream handler for registered provider");
-                // Convert broadcast receiver to stream
-                let mut stream = BroadcastStream::new(rx_registered);
-
-                while let Some(result) = stream.next().await {
-                    match result {
-                        Ok(changes) => {
-                            tracing::info!("[StreamHandler] Received {} changes from registered provider", changes.len());
-                            // Process each change and write to database via cache
-                            for change in changes {
-                                match change {
-                                    Change::Created { data, .. } | Change::Updated { data, .. } => {
-                                        tracing::debug!("[StreamHandler] Upserting change: id={}", data.id.clone());
-                                        // Write to database using cache's upsert method
-                                        if let Err(e) = cache_clone.upsert_to_cache(&data).await {
-                                            tracing::error!("[StreamHandler] Failed to ingest change into cache: {}", e);
-                                        } else {
-                                            tracing::debug!("[StreamHandler] Successfully upserted change");
-                                        }
-                                    }
-                                    Change::Deleted { id, .. } => {
-                                        tracing::debug!("[StreamHandler] Deleting change: id={}", id);
-                                        // Delete from database
-                                        if let Err(e) = cache_clone.delete_from_cache(&id).await {
-                                            tracing::error!("[StreamHandler] Failed to delete from cache: {}", e);
-                                        } else {
-                                            tracing::debug!("[StreamHandler] Successfully deleted change");
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!("[StreamHandler] Stream error: {:?}", e);
-                            // Continue processing - don't break on errors
-                        }
-                    }
-                }
-                tracing::warn!("[StreamHandler] Stream handler exited (stream closed)");
-            });
-        }
-
-        // Register syncable provider (wrapped in Arc<Mutex<...>>)
-        {
-            let mut engine_guard = engine.write().await;
-            engine_guard.register_syncable_provider("todoist".to_string(), sync_provider_for_registration.clone() as Arc<Mutex<dyn rusty_knowledge::core::datasource::SyncableProvider>>).await;
-
-            // Map table to entity
+            let engine_guard = engine.write().await;
             engine_guard.map_table_to_entity("todoist_tasks".to_string(), "todoist-task".to_string()).await;
         }
 
         // Initial sync to populate cache
-        // NOTE: We sync the datasource's provider first, then call cache.sync() to populate the cache
-        // The cache.sync() calls source.get_all() which fetches tasks from Todoist API
-        // TODO: Wire up ongoing updates from sync provider's stream to cache
+        // Sync the datasource provider (this emits changes via broadcast channels)
+        // Changes will be automatically ingested into cache via StreamRegistry
         {
             use rusty_knowledge::core::datasource::SyncableProvider;
-            // Sync the datasource's provider (this emits changes via broadcast channels)
-            // We need mutable access, so we create a temporary mutable copy
-            // This is a workaround - ideally TodoistSyncProvider would use interior mutability
-            let mut temp_provider = TodoistSyncProvider::new(TodoistClient::new(&api_key)).build();
+            // We need to create a temporary mutable copy for sync()
+            // This sync will emit changes that are automatically ingested by StreamRegistry
+            let mut temp_provider = TodoistSyncProvider::new(TodoistClient::new(&api_key));
             temp_provider.sync().await
-                .map_err(|e| miette::miette!("Failed to initial Todoist sync: {}", e))?;
+                .map_err(|e| miette::miette!("Failed to sync Todoist provider: {}", e))?;
+        }
 
-            // Also sync the registered provider so manual syncs work
+        // Also sync the registered provider so it has the same sync token
+        // This ensures manual syncs via UI work correctly
+        {
+            use rusty_knowledge::core::datasource::SyncableProvider;
             let mut provider_mut = sync_provider_for_registration.lock().await;
             provider_mut.sync().await
                 .map_err(|e| miette::miette!("Failed to sync registered provider: {}", e))?;
         }
 
         // Populate cache from datasource (calls source.get_all() which fetches from Todoist API)
+        // This ensures cache has initial data, subsequent updates come via stream
         cache.sync().await
             .map_err(|e| miette::miette!("Failed to sync cache: {}", e))?;
 

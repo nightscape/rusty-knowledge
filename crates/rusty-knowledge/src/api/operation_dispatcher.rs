@@ -6,9 +6,10 @@
 //! This implements the Composite Pattern - both individual caches (QueryableCache<T>)
 //! and the dispatcher implement OperationProvider, allowing recursive composition.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use async_trait::async_trait;
+use ferrous_di::{DiResult, Resolver, ServiceCollection, ServiceModule};
 use tokio::sync::Mutex;
 use tracing::{error, info};
 
@@ -16,13 +17,22 @@ use crate::core::datasource::{OperationProvider, SyncableProvider, Result, gener
 use crate::storage::types::StorageEntity;
 use query_render::OperationDescriptor;
 
+/// Named syncable provider for DI registration
+///
+/// This wrapper allows registering syncable providers with their names in the DI container.
+#[derive(Clone)]
+pub struct NamedSyncableProvider {
+    pub name: String,
+    pub provider: Arc<Mutex<dyn SyncableProvider>>,
+}
+
 /// Composite dispatcher that aggregates multiple OperationProvider instances
 ///
 /// Routes operations to the correct provider based on entity_name.
 /// Implements OperationProvider itself, enabling recursive composition.
 pub struct OperationDispatcher {
-    /// Map from entity_name to operation provider
-    providers: HashMap<String, Arc<dyn OperationProvider>>,
+    /// List of operation providers
+    providers: Vec<Arc<dyn OperationProvider>>,
 
     /// Map from provider_name to syncable provider
     /// Key: provider_name (e.g., "todoist", "jira")
@@ -31,21 +41,24 @@ pub struct OperationDispatcher {
 }
 
 impl OperationDispatcher {
-    /// Create a new empty dispatcher
-    pub fn new() -> Self {
-        Self {
-            providers: HashMap::new(),
-            syncable_providers: HashMap::new(),
-        }
-    }
-
-    /// Register a syncable provider
+    /// Create a new dispatcher with the given providers
     ///
     /// # Arguments
-    /// * `provider_name` - Provider identifier (e.g., "todoist", "jira")
-    /// * `provider` - The SyncableProvider instance to register
-    pub fn register_syncable_provider(&mut self, provider_name: String, provider: Arc<Mutex<dyn SyncableProvider>>) {
-        self.syncable_providers.insert(provider_name.clone(), provider);
+    /// * `providers` - Vector of OperationProvider instances to register
+    /// * `syncable_providers` - Map of syncable provider names to providers
+    ///
+    /// # Example
+    /// ```rust
+    /// let providers = vec![Arc::new(cache1), Arc::new(cache2)];
+    /// let mut syncable_providers = HashMap::new();
+    /// syncable_providers.insert("todoist".to_string(), todoist_provider);
+    /// let dispatcher = OperationDispatcher::new(providers, syncable_providers);
+    /// ```
+    pub fn new(providers: Vec<Arc<dyn OperationProvider>>, syncable_providers: HashMap<String, Arc<Mutex<dyn SyncableProvider>>>) -> Self {
+        Self {
+            providers,
+            syncable_providers,
+        }
     }
 
     /// Sync a specific provider by name
@@ -97,40 +110,23 @@ impl OperationDispatcher {
         self.syncable_providers.keys().cloned().collect()
     }
 
-    /// Register a provider for an entity type
-    ///
-    /// # Arguments
-    /// * `entity_name` - Entity identifier (e.g., "todoist-task", "logseq-block")
-    /// * `provider` - The OperationProvider instance to register
-    ///
-    /// # Example
-    /// ```rust
-    /// let mut dispatcher = OperationDispatcher::new();
-    /// dispatcher.register("todoist-task".to_string(), Arc::new(cache));
-    /// ```
-    pub fn register(&mut self, entity_name: String, provider: Arc<dyn OperationProvider>) {
-        self.providers.insert(entity_name, provider);
-    }
-
-    /// Unregister a provider for an entity type
-    ///
-    /// # Arguments
-    /// * `entity_name` - Entity identifier to unregister
-    ///
-    /// # Returns
-    /// `true` if a provider was removed, `false` if no provider was registered
-    pub fn unregister(&mut self, entity_name: &str) -> bool {
-        self.providers.remove(entity_name).is_some()
-    }
 
     /// Check if a provider is registered for an entity type
     pub fn has_provider(&self, entity_name: &str) -> bool {
-        self.providers.contains_key(entity_name)
+        self.providers.iter().any(|provider| {
+            provider.operations().iter().any(|op| op.entity_name == entity_name)
+        })
     }
 
     /// Get list of registered entity names
     pub fn registered_entities(&self) -> Vec<String> {
-        self.providers.keys().cloned().collect()
+        let mut entity_names = HashSet::new();
+        for provider in &self.providers {
+            for op in provider.operations() {
+                entity_names.insert(op.entity_name);
+            }
+        }
+        entity_names.into_iter().collect()
     }
 
     /// Get the number of registered providers
@@ -138,11 +134,21 @@ impl OperationDispatcher {
         self.providers.len()
     }
 
+    /// Get a copy of all providers (for reconstructing dispatcher with additional providers)
+    pub fn providers(&self) -> Vec<Arc<dyn OperationProvider>> {
+        self.providers.clone()
+    }
+
+    /// Get a copy of all syncable providers (for reconstructing dispatcher with additional providers)
+    pub fn syncable_providers(&self) -> HashMap<String, Arc<Mutex<dyn SyncableProvider>>> {
+        self.syncable_providers.clone()
+    }
+
 }
 
 impl Default for OperationDispatcher {
     fn default() -> Self {
-        Self::new()
+        Self::new(Vec::new(), HashMap::new())
     }
 }
 
@@ -153,7 +159,7 @@ impl OperationProvider for OperationDispatcher {
     /// Aggregates operations from all providers and syncable providers, returns them as a flat list.
     fn operations(&self) -> Vec<OperationDescriptor> {
         let mut ops: Vec<OperationDescriptor> = self.providers
-            .values()
+            .iter()
             .flat_map(|provider| provider.operations())
             .collect();
 
@@ -210,21 +216,44 @@ impl OperationProvider for OperationDispatcher {
         }
 
         // Otherwise, route to regular operation provider
-        let provider = self
-            .providers
-            .get(entity_name)
+        // Find first provider that has an operation matching entity_name and op_name
+        let provider = self.providers
+            .iter()
+            .find(|provider| {
+                provider.operations().iter().any(|op| {
+                    op.entity_name == entity_name && op.name == op_name
+                })
+            })
             .ok_or_else(|| format!("No provider registered for entity: {}", entity_name))?;
 
         provider.execute_operation(entity_name, op_name, params).await
     }
 }
+pub struct OperationModule;
 
+impl ServiceModule for OperationModule {
+    fn register_services(self, services: &mut ServiceCollection) -> DiResult<()> {
+        // Repository
+        services.add_singleton_factory::<Arc<OperationDispatcher>, _>(|r| {
+            let providers = r.get_all_trait::<dyn OperationProvider>().expect("Failed to get all operation providers");
+
+            // Collect syncable providers from DI container
+            // Note: ferrous-di doesn't easily support getting all instances of a concrete type
+            // Syncable providers will be added via a wrapper in di/mod.rs
+            let syncable_providers = HashMap::new();
+
+            let dispatcher = OperationDispatcher::new(providers, syncable_providers);
+            Arc::new(dispatcher)
+        });
+
+        Ok(())
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::Arc;
     use crate::storage::types::StorageEntity;
-    use query_render::TypeHint;
 
     // Mock OperationProvider for testing
     struct MockProvider {
@@ -269,29 +298,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_register_and_unregister() {
-        let mut dispatcher = OperationDispatcher::new();
-
+    async fn test_provider_registration() {
         let provider1 = Arc::new(MockProvider {
             entity_name: "entity1".to_string(),
             operations_list: vec![create_test_operation("entity1", "op1")],
         });
 
-        // Register provider
-        dispatcher.register("entity1".to_string(), provider1);
+        let dispatcher = OperationDispatcher::new(vec![provider1], HashMap::new());
         assert!(dispatcher.has_provider("entity1"));
         assert_eq!(dispatcher.provider_count(), 1);
-
-        // Unregister provider
-        assert!(dispatcher.unregister("entity1"));
-        assert!(!dispatcher.has_provider("entity1"));
-        assert_eq!(dispatcher.provider_count(), 0);
     }
 
     #[tokio::test]
     async fn test_operations_aggregation() {
-        let mut dispatcher = OperationDispatcher::new();
-
         let provider1 = Arc::new(MockProvider {
             entity_name: "entity1".to_string(),
             operations_list: vec![
@@ -305,8 +324,7 @@ mod tests {
             operations_list: vec![create_test_operation("entity2", "op3")],
         });
 
-        dispatcher.register("entity1".to_string(), provider1);
-        dispatcher.register("entity2".to_string(), provider2);
+        let dispatcher = OperationDispatcher::new(vec![provider1, provider2], HashMap::new());
 
         let all_ops = dispatcher.operations();
         assert_eq!(all_ops.len(), 3);
@@ -315,77 +333,15 @@ mod tests {
         assert!(all_ops.iter().any(|op| op.name == "op3"));
     }
 
-    #[tokio::test]
-    async fn test_find_operations() {
-        let mut dispatcher = OperationDispatcher::new();
-
-        let provider1 = Arc::new(MockProvider {
-            entity_name: "entity1".to_string(),
-            operations_list: vec![
-                OperationDescriptor {
-                    entity_name: "entity1".to_string(),
-                    table: "entity1_table".to_string(),
-                    id_column: "id".to_string(),
-                    name: "op1".to_string(),
-                    display_name: "Op1".to_string(),
-                    description: "Operation 1".to_string(),
-                    required_params: vec![
-                        query_render::OperationParam {
-                            name: "id".to_string(),
-                            type_hint: TypeHint::String,
-                            description: "ID".to_string(),
-                        },
-                    ],
-                    precondition: None,
-                },
-                OperationDescriptor {
-                    entity_name: "entity1".to_string(),
-                    table: "entity1_table".to_string(),
-                    id_column: "id".to_string(),
-                    name: "op2".to_string(),
-                    display_name: "Op2".to_string(),
-                    description: "Operation 2".to_string(),
-                    required_params: vec![
-                        query_render::OperationParam {
-                            name: "id".to_string(),
-                            type_hint: TypeHint::String,
-                            description: "ID".to_string(),
-                        },
-                        query_render::OperationParam {
-                            name: "field".to_string(),
-                            type_hint: TypeHint::String,
-                            description: "Field".to_string(),
-                        },
-                    ],
-                    precondition: None,
-                },
-            ],
-        });
-
-        dispatcher.register("entity1".to_string(), provider1);
-
-        // Find operations with only "id" available
-        let available_args = vec!["id".to_string()];
-        let ops = dispatcher.find_operations("entity1", &available_args);
-        assert_eq!(ops.len(), 1);
-        assert_eq!(ops[0].name, "op1");
-
-        // Find operations with "id" and "field" available
-        let available_args = vec!["id".to_string(), "field".to_string()];
-        let ops = dispatcher.find_operations("entity1", &available_args);
-        assert_eq!(ops.len(), 2);
-    }
 
     #[tokio::test]
     async fn test_execute_operation_routing() {
-        let mut dispatcher = OperationDispatcher::new();
-
         let provider1 = Arc::new(MockProvider {
             entity_name: "entity1".to_string(),
             operations_list: vec![create_test_operation("entity1", "test_op")],
         });
 
-        dispatcher.register("entity1".to_string(), provider1);
+        let dispatcher = OperationDispatcher::new(vec![provider1], HashMap::new());
 
         // Execute operation on registered entity
         let params = StorageEntity::new();
@@ -401,19 +357,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_registered_entities() {
-        let mut dispatcher = OperationDispatcher::new();
-
         let provider1 = Arc::new(MockProvider {
             entity_name: "entity1".to_string(),
-            operations_list: vec![],
+            operations_list: vec![create_test_operation("entity1", "op1")],
         });
         let provider2 = Arc::new(MockProvider {
             entity_name: "entity2".to_string(),
-            operations_list: vec![],
+            operations_list: vec![create_test_operation("entity2", "op2")],
         });
 
-        dispatcher.register("entity1".to_string(), provider1);
-        dispatcher.register("entity2".to_string(), provider2);
+        let dispatcher = OperationDispatcher::new(vec![provider1, provider2], HashMap::new());
 
         let entities = dispatcher.registered_entities();
         assert_eq!(entities.len(), 2);

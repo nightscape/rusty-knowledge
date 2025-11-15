@@ -1,11 +1,12 @@
 use async_trait::async_trait;
 use std::marker::PhantomData;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, broadcast};
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio_stream::Stream;
+use tracing;
 
 use super::entity::Entity;
 use super::traits::{HasSchema, Predicate, Queryable, Result, Schema};
@@ -199,6 +200,147 @@ where
             .unwrap_or("id");
 
         let sql = format!("DELETE FROM {} WHERE {} = ?", schema.table_name, id_field);
+        conn.execute(&sql, [turso::Value::Text(id.to_string())]).await
+            .map_err(|e| format!("Failed to execute delete: {}", e))?;
+
+        Ok(())
+    }
+
+    /// Wire up stream ingestion from a broadcast receiver (spawns background task)
+    ///
+    /// This method subscribes to a broadcast channel and updates the local cache
+    /// as changes arrive from the provider. The background task runs until the
+    /// stream is closed or the cache is dropped.
+    /// ExternalServiceDiscovery
+    pub fn ingest_stream(&self, rx: broadcast::Receiver<Vec<Change<T>>>)
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        let backend = Arc::clone(&self.backend);
+        let schema = T::schema();
+        let table_name = schema.table_name.clone();
+        let id_field = schema
+            .fields
+            .iter()
+            .find(|f| f.primary_key)
+            .map(|f| f.name.clone())
+            .unwrap_or_else(|| "id".to_string());
+
+        tokio::spawn(async move {
+            let mut rx = rx;
+            loop {
+                match rx.recv().await {
+                    Ok(changes) => {
+                        for change in changes {
+                            match change {
+                                Change::Created { data, .. } | Change::Updated { data, .. } => {
+                                    // Upsert to cache
+                                    if let Err(e) = Self::apply_change_to_cache(
+                                        &backend,
+                                        &table_name,
+                                        &id_field,
+                                        &data,
+                                    ).await {
+                                        tracing::error!("Error ingesting change into cache: {}", e);
+                                    }
+                                }
+                                Change::Deleted { id, .. } => {
+                                    if let Err(e) = Self::delete_from_cache_internal(
+                                        &backend,
+                                        &table_name,
+                                        &id_field,
+                                        &id,
+                                    ).await {
+                                        tracing::error!("Error deleting from cache: {}", e);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!("Stream lagged by {} messages, triggering resync", n);
+                        // TODO: Trigger full resync
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        tracing::info!("Change stream closed");
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    // Helper method for applying changes to cache
+    // ExternalServiceDiscovery
+    async fn apply_change_to_cache(
+        backend: &Arc<RwLock<TursoBackend>>,
+        table_name: &str,
+        id_field: &str,
+        item: &T,
+    ) -> Result<()>
+    where
+        T: HasSchema + Clone,
+    {
+        let backend_guard = backend.read().await;
+        let conn = backend_guard.get_connection()
+            .map_err(|e| format!("Failed to get connection: {}", e))?;
+        let entity = item.to_entity();
+        let schema = T::schema();
+
+        let mut columns = Vec::new();
+        let mut placeholders = Vec::new();
+        let mut values = Vec::new();
+
+        for field in &schema.fields {
+            if let Some(value) = entity.fields.get(&field.name) {
+                columns.push(field.name.clone());
+                placeholders.push("?");
+
+                let libsql_value = match value {
+                    super::value::Value::String(s) => turso::Value::Text(s.clone()),
+                    super::value::Value::Integer(i) => turso::Value::Integer(*i),
+                    super::value::Value::Float(f) => turso::Value::Real(*f),
+                    super::value::Value::Boolean(b) => turso::Value::Integer(if *b { 1 } else { 0 }),
+                    super::value::Value::Null => turso::Value::Null,
+                    _ => turso::Value::Null,
+                };
+                values.push(libsql_value);
+            }
+        }
+
+        let update_clause = columns
+            .iter()
+            .map(|c| format!("{} = excluded.{}", c, c))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let sql = format!(
+            "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT({}) DO UPDATE SET {}",
+            table_name,
+            columns.join(", "),
+            placeholders.join(", "),
+            id_field,
+            update_clause
+        );
+
+        conn.execute(&sql, turso::params_from_iter(values)).await
+            .map_err(|e| format!("Failed to execute upsert: {}", e))?;
+        Ok(())
+    }
+
+    // Helper method for deleting from cache
+    // ExternalServiceDiscovery
+    async fn delete_from_cache_internal(
+        backend: &Arc<RwLock<TursoBackend>>,
+        table_name: &str,
+        id_field: &str,
+        id: &str,
+    ) -> Result<()> {
+        let backend_guard = backend.read().await;
+        let conn = backend_guard.get_connection()
+            .map_err(|e| format!("Failed to get connection: {}", e))?;
+
+        let sql = format!("DELETE FROM {} WHERE {} = ?", table_name, id_field);
         conn.execute(&sql, [turso::Value::Text(id.to_string())]).await
             .map_err(|e| format!("Failed to execute delete: {}", e))?;
 

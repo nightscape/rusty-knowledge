@@ -662,6 +662,22 @@ pub trait SyncableProvider: Send + Sync {
     async fn sync(&mut self) -> Result<()>;
 }
 
+/// Trait for external sync providers that emit typed change streams
+///
+/// This trait allows QueryableCache to register and consume change streams
+/// from external systems (Todoist, etc.) in a type-safe way.
+/// ExternalServiceDiscovery
+pub trait StreamProvider<T>: Send + Sync
+where
+    T: Send + Sync + 'static,
+{
+    /// Get a receiver for changes of type T
+    ///
+    /// Returns a broadcast receiver that emits batches of changes.
+    /// Multiple QueryableCache instances can subscribe to the same stream.
+    fn subscribe(&self) -> tokio::sync::broadcast::Receiver<Vec<Change<T>>>;
+}
+
 /// Generate a sync operation descriptor for a provider
 ///
 /// This is used by OperationDispatcher when registering SyncableProviders

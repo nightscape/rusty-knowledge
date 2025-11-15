@@ -35,17 +35,6 @@ impl TodoistTaskDataSource {
     pub fn new(provider: Arc<TodoistSyncProvider>) -> Self {
         Self { provider }
     }
-
-    pub fn from_api_key(api_key: &str) -> Self {
-        Self {
-            provider: Arc::new(TodoistSyncProvider::from_api_key(api_key).build()),
-        }
-    }
-
-    /// Get the underlying provider (for testing)
-    pub fn provider(&self) -> &Arc<TodoistSyncProvider> {
-        &self.provider
-    }
 }
 
 
@@ -268,17 +257,6 @@ impl TodoistProjectDataSource {
     pub fn new(provider: Arc<TodoistSyncProvider>) -> Self {
         Self { provider }
     }
-
-    pub fn from_api_key(api_key: &str) -> Self {
-        Self {
-            provider: Arc::new(TodoistSyncProvider::from_api_key(api_key).build()),
-        }
-    }
-
-    /// Get the underlying provider (for testing)
-    pub fn provider(&self) -> &Arc<TodoistSyncProvider> {
-        &self.provider
-    }
 }
 
 
@@ -428,25 +406,6 @@ impl CrudOperationProvider<TodoistProject> for TodoistProjectDataSource {
     async fn delete(&self, id: &str) -> Result<()> {
         self.provider.client.delete_project(id).await?;
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn test_task_datasource_creation() {
-        let datasource = TodoistTaskDataSource::from_api_key("test_api_key");
-        // Verify it can be created
-        assert!(datasource.provider().get_sync_token().await.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_project_datasource_creation() {
-        let datasource = TodoistProjectDataSource::from_api_key("test_api_key");
-        // Verify it can be created
-        assert!(datasource.provider().get_sync_token().await.is_none());
     }
 }
 

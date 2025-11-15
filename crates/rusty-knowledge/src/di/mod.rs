@@ -7,11 +7,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use anyhow::Result;
 use tokio::sync::RwLock;
-use ferrous_di::{ServiceCollection, Resolver};
+use ferrous_di::{ServiceCollection, Resolver, ServiceModule, ServiceCollectionModuleExt};
 
 use crate::storage::turso::TursoBackend;
-use crate::api::operation_dispatcher::OperationDispatcher;
+use crate::api::operation_dispatcher::{OperationDispatcher, OperationModule, NamedSyncableProvider};
 use crate::api::render_engine::RenderEngine;
+use std::collections::HashMap;
 
 /// Configuration for database path
 #[derive(Clone, Debug)]
@@ -35,7 +36,14 @@ impl DatabasePathConfig {
 ///
 /// Note: Services are registered as Arc-wrapped types to avoid Clone requirements.
 /// The async initialization is handled by blocking in sync factories.
-pub fn register_core_services(services: &mut ServiceCollection, db_path: PathBuf) -> Result<()> {
+///
+/// # Arguments
+/// * `services` - Service collection to register services in
+/// * `db_path` - Path to the database file
+pub fn register_core_services(
+    services: &mut ServiceCollection,
+    db_path: PathBuf,
+) -> Result<()> {
     // Register database path configuration
     services.add_singleton(DatabasePathConfig::new(db_path.clone()));
 
@@ -56,9 +64,30 @@ pub fn register_core_services(services: &mut ServiceCollection, db_path: PathBuf
         Arc::new(RwLock::new(backend))
     });
 
+    // Register OperationModule to collect providers from DI
+    services.add_module_mut(OperationModule).map_err(|e| anyhow::anyhow!("Failed to register OperationModule: {}", e))?;
+
     // Register Arc<RwLock<OperationDispatcher>> as singleton factory
-    services.add_singleton_factory::<Arc<RwLock<OperationDispatcher>>, _>(|_resolver| {
-        Arc::new(RwLock::new(OperationDispatcher::new()))
+    // This wraps the Arc<OperationDispatcher> from OperationModule in RwLock
+    // We need to reconstruct it with syncable providers collected from DI
+    services.add_singleton_factory::<Arc<RwLock<OperationDispatcher>>, _>(|resolver| {
+        let dispatcher_arc_arc = resolver.get_required::<Arc<OperationDispatcher>>();
+        let dispatcher_arc = (*dispatcher_arc_arc).clone();
+        // Get providers from the dispatcher created by OperationModule
+        let providers = dispatcher_arc.providers();
+
+        // Collect syncable providers from DI
+        // Try to get NamedSyncableProvider - if it exists, use it
+        let mut syncable_providers = HashMap::new();
+        if let Ok(named_provider_arc_arc) = resolver.get::<NamedSyncableProvider>() {
+            let named_provider = (*named_provider_arc_arc).clone();
+            syncable_providers.insert(named_provider.name.clone(), named_provider.provider.clone());
+        }
+
+        Arc::new(RwLock::new(OperationDispatcher::new(
+            providers,
+            syncable_providers,
+        )))
     });
 
     // Register Arc<RwLock<RenderEngine>> as singleton factory with blocking async initialization
@@ -76,12 +105,10 @@ pub fn register_core_services(services: &mut ServiceCollection, db_path: PathBuf
         let backend_arc_clone = backend_arc.clone();
         let dispatcher_clone = dispatcher.clone();
         let engine = std::thread::spawn(move || {
-            let rt = tokio::runtime::Runtime::new()
-                .expect("Failed to create tokio runtime");
-            rt.block_on(RenderEngine::from_dependencies(
+            RenderEngine::from_dependencies(
                 backend_arc_clone,
                 dispatcher_clone,
-            )).expect("Failed to create RenderEngine")
+            ).expect("Failed to create RenderEngine")
         })
         .join()
         .expect("Thread panicked while creating RenderEngine");

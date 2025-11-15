@@ -40,7 +40,7 @@ impl RenderEngine {
     pub async fn new(db_path: PathBuf) -> Result<Self> {
         let backend = Arc::new(RwLock::new(TursoBackend::new(db_path).await?));
 
-        let dispatcher = OperationDispatcher::new();
+        let dispatcher = OperationDispatcher::new(Vec::new(), HashMap::new());
 
         Ok(Self {
             backend,
@@ -56,7 +56,7 @@ impl RenderEngine {
     pub async fn new_in_memory() -> Result<Self> {
         let backend = Arc::new(RwLock::new(TursoBackend::new_in_memory().await?));
 
-        let dispatcher = OperationDispatcher::new();
+        let dispatcher = OperationDispatcher::new(Vec::new(), HashMap::new());
 
         Ok(Self {
             backend,
@@ -69,7 +69,7 @@ impl RenderEngine {
     ///
     /// This constructor allows creating RenderEngine with pre-constructed dependencies,
     /// useful for dependency injection frameworks.
-    pub async fn from_dependencies(
+    pub fn from_dependencies(
         backend: Arc<RwLock<TursoBackend>>,
         dispatcher: Arc<RwLock<OperationDispatcher>>,
     ) -> Result<Self> {
@@ -481,19 +481,6 @@ impl RenderEngine {
         self.backend.clone()
     }
 
-    /// Register a syncable provider (delegates to dispatcher)
-    ///
-    /// # Arguments
-    /// * `provider_name` - Provider identifier (e.g., "todoist", "jira")
-    /// * `provider` - The SyncableProvider instance to register
-    pub async fn register_syncable_provider(
-        &self,
-        provider_name: String,
-        provider: Arc<tokio::sync::Mutex<dyn crate::core::datasource::SyncableProvider>>,
-    ) {
-        let mut dispatcher = self.dispatcher.write().await;
-        dispatcher.register_syncable_provider(provider_name, provider);
-    }
 
     /// Sync all registered providers (delegates to dispatcher)
     pub async fn sync_all_providers(&self) -> Result<()> {
@@ -759,8 +746,13 @@ mod tests {
             "blocks".to_string(),
         ));
         {
+            let dispatcher = engine.dispatcher.read().await;
+            let mut providers = dispatcher.providers();
+            let syncable_providers = dispatcher.syncable_providers();
+            providers.push(provider);
+            drop(dispatcher);
             let mut dispatcher = engine.dispatcher.write().await;
-            dispatcher.register("blocks".to_string(), provider);
+            *dispatcher = OperationDispatcher::new(providers, syncable_providers);
         }
 
         // Execute operation to update completed field
@@ -811,8 +803,13 @@ mod tests {
             "blocks".to_string(),
         ));
         {
+            let dispatcher = engine.dispatcher.read().await;
+            let mut providers = dispatcher.providers();
+            let syncable_providers = dispatcher.syncable_providers();
+            providers.push(provider);
+            drop(dispatcher);
             let mut dispatcher = engine.dispatcher.write().await;
-            dispatcher.register("blocks".to_string(), provider);
+            *dispatcher = OperationDispatcher::new(providers, syncable_providers);
         }
 
         // Verify operations are available

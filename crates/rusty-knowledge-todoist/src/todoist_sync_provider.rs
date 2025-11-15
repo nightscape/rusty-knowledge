@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
 use async_trait::async_trait;
 
-use rusty_knowledge::core::datasource::{Change, ChangeOrigin, Result, SyncableProvider};
+use rusty_knowledge::core::datasource::{Change, ChangeOrigin, Result, SyncableProvider, StreamProvider};
 
 use crate::client::TodoistClient;
 use crate::models::{SyncResponse, TodoistTask, TodoistProject, TodoistTaskApiResponse};
@@ -92,6 +92,20 @@ impl SyncableProvider for TodoistSyncProvider {
         let _ = self.project_tx.send(project_changes);
 
         Ok(())
+    }
+}
+
+// ExternalServiceDiscovery
+impl StreamProvider<TodoistTask> for TodoistSyncProvider {
+    fn subscribe(&self) -> tokio::sync::broadcast::Receiver<Vec<Change<TodoistTask>>> {
+        self.subscribe_tasks()
+    }
+}
+
+// ExternalServiceDiscovery
+impl StreamProvider<TodoistProject> for TodoistSyncProvider {
+    fn subscribe(&self) -> tokio::sync::broadcast::Receiver<Vec<Change<TodoistProject>>> {
+        self.subscribe_projects()
     }
 }
 
