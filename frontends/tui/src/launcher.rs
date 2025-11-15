@@ -109,12 +109,9 @@ pub async fn run_app(db_path: PathBuf, keybindings_path: Option<PathBuf>) -> Com
         use std::sync::Arc;
 
         // Get the syncable provider from DI (it was registered above)
-        // Access it through the resolver - ferrous-di wraps in Arc, so we get Arc<Arc<NamedSyncableProvider>>
+        // Access it directly as Arc<dyn SyncableProvider> (no longer needs Mutex)
         let sync_provider_for_registration = {
-            let named_provider_arc_arc = provider.get_required::<rusty_knowledge::api::operation_dispatcher::NamedSyncableProvider>();
-            // Access the inner Arc<NamedSyncableProvider> and clone it to get the provider
-            let named_provider = (*named_provider_arc_arc).clone();
-            named_provider.provider
+            provider.get_required::<Arc<dyn rusty_knowledge::core::datasource::SyncableProvider>>().clone()
         };
 
         // Create TodoistSyncProvider instance for datasource/stream
@@ -167,20 +164,23 @@ pub async fn run_app(db_path: PathBuf, keybindings_path: Option<PathBuf>) -> Com
         // Changes will be automatically ingested into cache via StreamRegistry
         {
             use rusty_knowledge::core::datasource::SyncableProvider;
-            // We need to create a temporary mutable copy for sync()
-            // This sync will emit changes that are automatically ingested by StreamRegistry
-            let mut temp_provider = TodoistSyncProvider::new(TodoistClient::new(&api_key));
-            temp_provider.sync().await
+            // Sync with Beginning position (full sync) - this will emit changes that are automatically ingested by StreamRegistry
+            use rusty_knowledge::core::datasource::StreamPosition;
+            let temp_provider = TodoistSyncProvider::new(TodoistClient::new(&api_key));
+            let _new_position = temp_provider.sync(StreamPosition::Beginning).await
                 .map_err(|e| miette::miette!("Failed to sync Todoist provider: {}", e))?;
+            // TODO: Persist the new_position
         }
 
         // Also sync the registered provider so it has the same sync token
         // This ensures manual syncs via UI work correctly
+        // Note: sync() now takes the token as parameter and returns the new token
         {
-            use rusty_knowledge::core::datasource::SyncableProvider;
-            let mut provider_mut = sync_provider_for_registration.lock().await;
-            provider_mut.sync().await
+            use rusty_knowledge::core::datasource::{SyncableProvider, StreamPosition};
+            // For initial sync, pass Beginning (full sync)
+            let _new_position = sync_provider_for_registration.sync(StreamPosition::Beginning).await
                 .map_err(|e| miette::miette!("Failed to sync registered provider: {}", e))?;
+            // TODO: Persist the new_position to database/file
         }
 
         // Populate cache from datasource (calls source.get_all() which fetches from Todoist API)

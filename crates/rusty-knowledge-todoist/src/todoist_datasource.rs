@@ -91,11 +91,11 @@ impl ChangeNotifications<TodoistTask> for TodoistTaskDataSource {
     }
 
     async fn get_current_version(&self) -> std::result::Result<Vec<u8>, ApiError> {
-        // Return sync token as version, or empty vec if no token
-        let token = self.provider.get_sync_token().await;
-        Ok(token
-            .map(|t| t.as_bytes().to_vec())
-            .unwrap_or_default())
+        // Note: Sync tokens are now managed externally (by OperationDispatcher or caller)
+        // This method should return the current version from the dispatcher or database
+        // For now, return empty vec - the version should be retrieved from OperationDispatcher
+        // TODO: Get sync token from OperationDispatcher or database
+        Ok(Vec::new())
     }
 }
 
@@ -307,11 +307,11 @@ impl ChangeNotifications<TodoistProject> for TodoistProjectDataSource {
     }
 
     async fn get_current_version(&self) -> std::result::Result<Vec<u8>, ApiError> {
-        // Return sync token as version, or empty vec if no token
-        let token = self.provider.get_sync_token().await;
-        Ok(token
-            .map(|t| t.as_bytes().to_vec())
-            .unwrap_or_default())
+        // Note: Sync tokens are now managed externally (by OperationDispatcher or caller)
+        // This method should return the current version from the dispatcher or database
+        // For now, return empty vec - the version should be retrieved from OperationDispatcher
+        // TODO: Get sync token from OperationDispatcher or database
+        Ok(Vec::new())
     }
 }
 

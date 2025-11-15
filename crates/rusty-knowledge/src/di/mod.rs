@@ -10,7 +10,7 @@ use tokio::sync::RwLock;
 use ferrous_di::{ServiceCollection, Resolver, ServiceModule, ServiceCollectionModuleExt};
 
 use crate::storage::turso::TursoBackend;
-use crate::api::operation_dispatcher::{OperationDispatcher, OperationModule, NamedSyncableProvider};
+use crate::api::operation_dispatcher::{OperationDispatcher, OperationModule};
 use crate::api::render_engine::RenderEngine;
 use std::collections::HashMap;
 
@@ -76,12 +76,14 @@ pub fn register_core_services(
         // Get providers from the dispatcher created by OperationModule
         let providers = dispatcher_arc.providers();
 
-        // Collect syncable providers from DI
-        // Try to get NamedSyncableProvider - if it exists, use it
+        // Collect syncable providers from DI using get_all_trait
+        // Now that sync() doesn't require &mut, providers can be Arc<dyn SyncableProvider> instead of Arc<Mutex<...>>
         let mut syncable_providers = HashMap::new();
-        if let Ok(named_provider_arc_arc) = resolver.get::<NamedSyncableProvider>() {
-            let named_provider = (*named_provider_arc_arc).clone();
-            syncable_providers.insert(named_provider.name.clone(), named_provider.provider.clone());
+        if let Ok(providers) = resolver.get_all_trait::<dyn crate::core::datasource::SyncableProvider>() {
+            for provider in providers {
+                let name = provider.provider_name().to_string();
+                syncable_providers.insert(name, provider);
+            }
         }
 
         Arc::new(RwLock::new(OperationDispatcher::new(
@@ -119,10 +121,4 @@ pub fn register_core_services(
     Ok(())
 }
 
-/// Helper function to get RenderEngine's backend from DI container
-///
-/// This is useful when other services need to share the same backend instance.
-pub fn get_backend_from_engine(engine: &RenderEngine) -> Arc<RwLock<TursoBackend>> {
-    engine.get_backend()
-}
 

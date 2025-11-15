@@ -7,10 +7,10 @@
 //! - Fire-and-forget operations - updates arrive via streams
 
 use std::sync::Arc;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::broadcast;
 use async_trait::async_trait;
 
-use rusty_knowledge::core::datasource::{Change, ChangeOrigin, Result, SyncableProvider, StreamProvider};
+use rusty_knowledge::core::datasource::{Change, ChangeOrigin, Result, SyncableProvider, StreamProvider, StreamPosition};
 
 use crate::client::TodoistClient;
 use crate::models::{SyncResponse, TodoistTask, TodoistProject, TodoistTaskApiResponse};
@@ -24,7 +24,6 @@ pub struct TodoistSyncProvider {
     pub(crate) client: TodoistClient,
     task_tx: broadcast::Sender<Vec<Change<TodoistTask>>>,
     project_tx: broadcast::Sender<Vec<Change<TodoistProject>>>,
-    sync_token: Arc<RwLock<Option<String>>>,
 }
 
 impl TodoistSyncProvider {
@@ -33,7 +32,6 @@ impl TodoistSyncProvider {
             client,
             task_tx: broadcast::channel(1000).0,
             project_tx: broadcast::channel(1000).0,
-            sync_token: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -46,37 +44,32 @@ impl TodoistSyncProvider {
     pub fn subscribe_projects(&self) -> broadcast::Receiver<Vec<Change<TodoistProject>>> {
         self.project_tx.subscribe()
     }
-
-    /// Get the current sync token (for testing)
-    pub async fn get_sync_token(&self) -> Option<String> {
-        let sync_token = self.sync_token.read().await;
-        sync_token.clone()
-    }
 }
 
 #[async_trait]
 impl SyncableProvider for TodoistSyncProvider {
+    fn provider_name(&self) -> &str {
+        "todoist"
+    }
+
     /// Trigger sync - ONE API call, emits on multiple streams
     ///
     /// This method:
     /// 1. Calls sync_items() API (returns tasks + projects in one response)
-    /// 2. Updates sync_token
-    /// 3. Splits response into task and project changes
-    /// 4. Emits changes on separate typed streams
-    async fn sync(&mut self) -> Result<()> {
-        let token = {
-            let sync_token = self.sync_token.read().await;
-            sync_token.clone()
+    /// 2. Splits response into task and project changes
+    /// 3. Emits changes on separate typed streams
+    /// 4. Returns the new stream position for persistence
+    async fn sync(&self, position: StreamPosition) -> Result<StreamPosition> {
+        // Extract sync token from StreamPosition
+        let token_str = match &position {
+            StreamPosition::Beginning => None, // Full sync
+            StreamPosition::Version(bytes) => {
+                std::str::from_utf8(bytes).ok()
+            }
         };
 
         // Make ONE API call that returns both tasks and projects
-        let response = self.client.sync_items(token.as_deref()).await?;
-
-        // Update sync token
-        if let Some(new_token) = response.sync_token.clone() {
-            let mut sync_token = self.sync_token.write().await;
-            *sync_token = Some(new_token);
-        }
+        let response = self.client.sync_items(token_str).await?;
 
         // Split and emit on separate typed streams
         let task_changes = compute_task_changes(&response);
@@ -91,7 +84,12 @@ impl SyncableProvider for TodoistSyncProvider {
         }
         let _ = self.project_tx.send(project_changes);
 
-        Ok(())
+        // Return the new sync token as StreamPosition::Version
+        // If no token is returned, return Beginning (though this shouldn't happen in practice)
+        match response.sync_token {
+            Some(token) => Ok(StreamPosition::Version(token.as_bytes().to_vec())),
+            None => Ok(StreamPosition::Beginning), // Fallback - shouldn't happen
+        }
     }
 }
 

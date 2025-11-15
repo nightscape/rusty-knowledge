@@ -495,8 +495,10 @@ impl RenderEngine {
     /// * `provider_name` - Provider identifier (e.g., "todoist")
     pub async fn sync_provider(&self, provider_name: &str) -> Result<()> {
         let dispatcher = self.dispatcher.read().await;
-        dispatcher.sync_provider(provider_name).await
-            .map_err(|e| anyhow::anyhow!("Failed to sync provider {}: {}", provider_name, e))
+        let _new_token = dispatcher.sync_provider(provider_name).await
+            .map_err(|e| anyhow::anyhow!("Failed to sync provider {}: {}", provider_name, e))?;
+        // TODO: Persist the new_token to database/file
+        Ok(())
     }
 
 }

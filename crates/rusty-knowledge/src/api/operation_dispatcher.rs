@@ -13,18 +13,9 @@ use ferrous_di::{DiResult, Resolver, ServiceCollection, ServiceModule};
 use tokio::sync::Mutex;
 use tracing::{error, info};
 
-use crate::core::datasource::{OperationProvider, SyncableProvider, Result, generate_sync_operation};
+use crate::core::datasource::{OperationProvider, SyncableProvider, Result, generate_sync_operation, StreamPosition};
 use crate::storage::types::StorageEntity;
 use query_render::OperationDescriptor;
-
-/// Named syncable provider for DI registration
-///
-/// This wrapper allows registering syncable providers with their names in the DI container.
-#[derive(Clone)]
-pub struct NamedSyncableProvider {
-    pub name: String,
-    pub provider: Arc<Mutex<dyn SyncableProvider>>,
-}
 
 /// Composite dispatcher that aggregates multiple OperationProvider instances
 ///
@@ -36,8 +27,15 @@ pub struct OperationDispatcher {
 
     /// Map from provider_name to syncable provider
     /// Key: provider_name (e.g., "todoist", "jira")
-    /// Value: SyncableProvider wrapped in Mutex for mutable sync access
-    syncable_providers: HashMap<String, Arc<Mutex<dyn SyncableProvider>>>,
+    /// Value: SyncableProvider (no longer needs Mutex since sync() doesn't require &mut)
+    syncable_providers: HashMap<String, Arc<dyn SyncableProvider>>,
+
+    /// Map from provider_name to current sync token (persisted externally)
+    /// Key: provider_name (e.g., "todoist", "jira")
+    /// Value: Current sync token as StreamPosition::Version
+    /// Note: This should be persisted to database/file, not just in memory
+    /// Uses RwLock for interior mutability so execute_operation can stay &self
+    sync_tokens: Arc<tokio::sync::RwLock<HashMap<String, StreamPosition>>>,
 }
 
 impl OperationDispatcher {
@@ -54,10 +52,24 @@ impl OperationDispatcher {
     /// syncable_providers.insert("todoist".to_string(), todoist_provider);
     /// let dispatcher = OperationDispatcher::new(providers, syncable_providers);
     /// ```
-    pub fn new(providers: Vec<Arc<dyn OperationProvider>>, syncable_providers: HashMap<String, Arc<Mutex<dyn SyncableProvider>>>) -> Self {
+    pub fn new(providers: Vec<Arc<dyn OperationProvider>>, syncable_providers: HashMap<String, Arc<dyn SyncableProvider>>) -> Self {
         Self {
             providers,
             syncable_providers,
+            sync_tokens: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// Create a new dispatcher with sync tokens (for restoring from persistence)
+    pub fn new_with_tokens(
+        providers: Vec<Arc<dyn OperationProvider>>,
+        syncable_providers: HashMap<String, Arc<dyn SyncableProvider>>,
+        sync_tokens: HashMap<String, StreamPosition>,
+    ) -> Self {
+        Self {
+            providers,
+            syncable_providers,
+            sync_tokens: Arc::new(tokio::sync::RwLock::new(sync_tokens)),
         }
     }
 
@@ -65,20 +77,38 @@ impl OperationDispatcher {
     ///
     /// Provider name can be extracted from operation name using `provider.operation` convention.
     /// Example: "todoist.sync" → provider_name = "todoist"
-    pub async fn sync_provider(&self, provider_name: &str) -> Result<()> {
+    ///
+    /// Returns the new sync token which should be persisted by the caller.
+    pub async fn sync_provider(&self, provider_name: &str) -> Result<StreamPosition> {
         let provider = self.syncable_providers
             .get(provider_name)
             .ok_or_else(|| format!("No syncable provider registered: {}", provider_name))?;
 
-        let mut provider_guard = provider.lock().await;
-        provider_guard.sync().await
+        // Get current stream position (or Beginning for first sync)
+        let current_position = {
+            let tokens = self.sync_tokens.read().await;
+            tokens.get(provider_name)
+                .cloned()
+                .unwrap_or(StreamPosition::Beginning)
+        };
+
+        // Call sync with current position
+        let new_position = provider.sync(current_position).await?;
+
+        // Update stored position (caller should persist this)
+        {
+            let mut tokens = self.sync_tokens.write().await;
+            tokens.insert(provider_name.to_string(), new_position.clone());
+        }
+
+        Ok(new_position)
     }
 
     /// Sync provider from operation name
     ///
     /// Extracts provider name from `provider.operation` format.
     /// Example: "todoist.sync" → syncs "todoist" provider
-    pub async fn sync_provider_from_operation(&self, operation_name: &str) -> Result<()> {
+    pub async fn sync_provider_from_operation(&self, operation_name: &str) -> Result<StreamPosition> {
         let provider_name = operation_name
             .split('.')
             .next()
@@ -91,9 +121,22 @@ impl OperationDispatcher {
         info!("[OperationDispatcher] Syncing all providers: count={}", self.syncable_providers.len());
         for (name, provider) in self.syncable_providers.iter() {
             info!("[OperationDispatcher] Syncing provider: {}", name);
-            let mut provider_guard = provider.lock().await;
-            match provider_guard.sync().await {
-                Ok(_) => {
+
+            // Get current stream position for this provider
+            let current_position = {
+                let tokens = self.sync_tokens.read().await;
+                tokens.get(name)
+                    .cloned()
+                    .unwrap_or(StreamPosition::Beginning)
+            };
+
+            match provider.sync(current_position).await {
+                Ok(new_position) => {
+                    // Update stored position (caller should persist this)
+                    {
+                        let mut tokens = self.sync_tokens.write().await;
+                        tokens.insert(name.clone(), new_position);
+                    }
                     info!("[OperationDispatcher] Successfully synced provider: {}", name);
                 }
                 Err(e) => {
@@ -140,8 +183,20 @@ impl OperationDispatcher {
     }
 
     /// Get a copy of all syncable providers (for reconstructing dispatcher with additional providers)
-    pub fn syncable_providers(&self) -> HashMap<String, Arc<Mutex<dyn SyncableProvider>>> {
+    pub fn syncable_providers(&self) -> HashMap<String, Arc<dyn SyncableProvider>> {
         self.syncable_providers.clone()
+    }
+
+    /// Get a copy of all sync tokens (for persistence)
+    pub async fn sync_tokens(&self) -> HashMap<String, StreamPosition> {
+        let tokens = self.sync_tokens.read().await;
+        tokens.clone()
+    }
+
+    /// Set sync tokens (for restoring from persistence)
+    pub async fn set_sync_tokens(&self, tokens: HashMap<String, StreamPosition>) {
+        let mut sync_tokens = self.sync_tokens.write().await;
+        *sync_tokens = tokens;
     }
 
 }
@@ -212,7 +267,8 @@ impl OperationProvider for OperationDispatcher {
     ) -> Result<()> {
         // Check if this is a sync operation (format: "provider.sync")
         if op_name == "sync" && entity_name.contains('.') {
-            return self.sync_provider_from_operation(entity_name).await;
+            self.sync_provider_from_operation(entity_name).await?;
+            return Ok(());
         }
 
         // Otherwise, route to regular operation provider

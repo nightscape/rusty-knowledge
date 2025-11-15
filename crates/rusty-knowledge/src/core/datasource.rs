@@ -653,13 +653,24 @@ pub trait OperationRegistry: Send + Sync {
 /// using the format "{provider_name}.sync" (e.g., "todoist.sync", "jira.sync").
 #[async_trait]
 pub trait SyncableProvider: Send + Sync {
+    /// Get the provider name (e.g., "todoist", "jira")
+    ///
+    /// This name is used to generate sync operations and identify the provider.
+    fn provider_name(&self) -> &str;
+
     /// Sync data from the external system
     ///
     /// This method should:
-    /// - Fetch updates from the external system
+    /// - Fetch updates from the external system using the provided stream position
     /// - Emit changes via streams (if applicable)
-    /// - Update internal state (sync tokens, etc.)
-    async fn sync(&mut self) -> Result<()>;
+    /// - Return the new stream position for persistence
+    ///
+    /// # Arguments
+    /// * `position` - Current stream position (StreamPosition::Beginning for full sync, StreamPosition::Version(token) for incremental sync)
+    ///
+    /// # Returns
+    /// The new stream position (typically StreamPosition::Version with new token, or StreamPosition::Beginning if no token)
+    async fn sync(&self, position: StreamPosition) -> Result<StreamPosition>;
 }
 
 /// Trait for external sync providers that emit typed change streams
